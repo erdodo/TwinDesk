@@ -1,6 +1,7 @@
 // TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE.
-// Watches NSPasteboard.changeCount (cheap) so main reads the text only when it changed, and tells
-// whether the item is marked concealed/transient by a password manager (nspasteboard.org types).
+// Watches NSPasteboard.changeCount (cheap) so main reads the content only when it changed, and tells
+// what the item holds (text, image, file list) and whether it is marked concealed/transient by a
+// password manager (nspasteboard.org types). Also writes a file list (Finder pastes it).
 import Cocoa
 
 final class PasteboardWatch {
@@ -16,7 +17,26 @@ final class PasteboardWatch {
   static func info() -> [String: Any] {
     let pb = NSPasteboard.general
     let types = Set((pb.types ?? []).map { $0.rawValue })
-    return ["changeCount": pb.changeCount, "concealed": !types.isDisjoint(with: privateTypes)]
+    var out: [String: Any] = ["changeCount": pb.changeCount, "concealed": !types.isDisjoint(with: privateTypes)]
+    out["text"] = types.contains(NSPasteboard.PasteboardType.string.rawValue)
+    out["image"] = types.contains(NSPasteboard.PasteboardType.png.rawValue) || types.contains(NSPasteboard.PasteboardType.tiff.rawValue)
+    // Files copied in Finder (or anywhere): their paths, read only when the item says it has file URLs.
+    if types.contains(NSPasteboard.PasteboardType.fileURL.rawValue) {
+      let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+      out["files"] = urls.prefix(1000).map { $0.path }
+    }
+    return out
+  }
+
+  // Put these files on the clipboard as file URLs, so Finder's paste (and any app's) takes them.
+  // Returns the new changeCount (the caller then knows the change was its own), nil when it failed.
+  static func writeFiles(_ paths: [String]) -> Int? {
+    let urls: [NSPasteboardWriting] = paths.map { NSURL(fileURLWithPath: $0) }
+    guard !urls.isEmpty else { return nil }
+    let pb = NSPasteboard.general
+    pb.clearContents()
+    guard pb.writeObjects(urls) else { return nil }
+    return pb.changeCount
   }
 
   func set(on: Bool) {
