@@ -391,4 +391,34 @@ const nextItem = () => 'item' + (++itemNo);
   assert.strictEqual(sent[0][1].o, 'O', 'relay keeps the origin');
 }
 
+// 6c. A clipboard copy has `ts` (the time of the copy) and `o` (the device that copied). An old
+// one-to-one peer of the latest-copy-wins kind sends them without pool stamps: its `o` is not a
+// pool stamp (the missing `s` tells), each such item still gets its own sequence number, and the
+// peer gets `ts` and `o` back, but no `s`, `d`, `h`.
+{
+  const sent = [];
+  const pool = new Pool({
+    name: 'clip',
+    selfId: 'X',
+    peers: () => [
+      { id: 'L', mesh: false, pool: true, send: (m) => (sent.push(['L', m]), true) },
+      { id: 'B', mesh: true, pool: true, send: (m) => (sent.push(['B', m]), true) },
+    ],
+  });
+  const a = pool.receive('L', { t: 'clip', text: 'one', ts: 100, o: 'L' });
+  const b = pool.receive('L', { t: 'clip', text: 'two', ts: 200, o: 'L' });
+  assert.ok(a.fresh && b.fresh, 'two items from the old peer are both fresh');
+  assert.deepStrictEqual([a.msg.o, a.msg.s, b.msg.s], ['L', 1, 2]);
+  assert.deepStrictEqual(a.relayed, ['B']);
+  assert.deepStrictEqual([sent[0][1].o, sent[0][1].s, sent[0][1].ts], ['L', 1, 100], 'a mesh peer gets the pool stamp');
+  sent.length = 0;
+  const pub = pool.publish({ t: 'clip', text: 'mine', ts: 300 });
+  assert.deepStrictEqual(pub.sent, ['L', 'B']);
+  const toOld = sent.find((x) => x[0] === 'L')[1];
+  assert.deepStrictEqual([toOld.o, toOld.ts, 's' in toOld, 'd' in toOld, 'h' in toOld], ['X', 300, false, false, false]);
+  sent.length = 0;
+  pool.publish({ t: 'notif', id: 'n' }); // no time: no origin either
+  assert.ok(!('o' in sent.find((x) => x[0] === 'L')[1]));
+}
+
 console.log('mesh-pool: passed');

@@ -254,6 +254,28 @@ class MeshPoolTest {
         assertEquals(0L, received[0].s) // no sequence number either
     }
 
+    // 3a. A clipboard item with the time of its copy (`ts`) keeps the copy's origin `o` for a legacy peer
+    // (an old app of the latest-copy-wins kind reads it); the pool's other stamps are gone.
+    @Test
+    fun legacyPeerGetsTheTimeAndOriginOfAClipboardCopy() {
+        val sent = ArrayList<PoolMsg>()
+        val pool = Pool("A", { listOf(PoolPeer("L", mesh = false, pool = true) { m -> sent.add(m); true }) })
+        pool.publish(mapOf("t" to "clip", "text" to "x", "ts" to 1234L))
+        pool.publish(mapOf("t" to "notif", "id" to "n"))
+        assertNull(sent[0].o)
+        assertEquals(0L, sent[0].s)
+        assertEquals("A", sent[0].body["o"])
+        assertEquals(1234L, sent[0].body["ts"])
+        assertEquals("no time, no origin in the body", false, sent[1].body.containsKey("o"))
+        // an item of the old peer itself (its `o` was moved to the body, no sequence number): stamped by the pool
+        val received = Pool("A", { listOf(PoolPeer("L", mesh = false, pool = true) { true }) })
+        val r = received.receive("L", PoolMsg(mapOf("t" to "clip", "text" to "y", "ts" to 99L, "o" to "L")))
+        assertEquals(true, r.fresh)
+        assertEquals("L", r.msg.o)
+        assertEquals(1L, r.msg.s)
+        assertEquals(99L, r.msg.body["ts"])
+    }
+
     // 3b. Legacy items in a loop: triangle A-B-C with the legacy leaf L on B. Two different items from
     // L must each be applied once everywhere (the stamp given at B keeps them apart).
     @Test

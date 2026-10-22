@@ -177,9 +177,12 @@ class Core private constructor(val ctx: Context) : Link.Events {
     fun known(): List<Known> = members.known(links.connectedLinks().mapNotNull { l -> l.host?.let { Member(it.id, it.name, it.os) } })
 
     // The pool's view of the connected computers (Clip and Notifs): each gets the items where accept says so.
-    fun poolPeers(accept: (String) -> Boolean): List<PoolPeer> = links.connectedLinks().map { l ->
+    fun poolPeers(accept: (String) -> Boolean): List<PoolPeer> = poolPeersFor { id, _ -> accept(id) }
+
+    // The same, where accept also sees the message (Clip: images only go to a computer that takes them).
+    fun poolPeersFor(accept: (String, PoolMsg) -> Boolean): List<PoolPeer> = links.connectedLinks().map { l ->
         val id = l.hostId
-        PoolPeer(id, l.mesh, true) { m -> accept(id) && l.send(m.toJson()) }
+        PoolPeer(id, l.mesh, true) { m -> accept(id, m) && l.send(m.toJson()) }
     }
 
     // The name of the computer an item started on (its origin), else the one it came from.
@@ -500,7 +503,11 @@ class Core private constructor(val ctx: Context) : Link.Events {
         // notifications, layout) and the policy switches that go with them.
         // What every computer sends the phone for its own adb bridge (the pointer overlay, the bridge state, the app list), attached or not.
         private val FROM_ANY_COMPUTER = setOf(Proto.T.PHONE_POINTER, Proto.T.ADB_BRIDGE, Proto.T.PHONE_APPS_LIST)
-        private val POOLED_TYPES = setOf(Proto.T.LAYOUT, Proto.T.CLIP, Proto.T.CLIP_POLICY, Proto.T.NOTIF, Proto.T.NOTIF_POLICY)
+        // (a file offer from a computer that is not the attached one is only noted, FileClip.kt)
+        private val POOLED_TYPES = setOf(
+            Proto.T.LAYOUT, Proto.T.CLIP, Proto.T.CLIP_POLICY, Proto.T.CLIP_IMAGE, Proto.T.CLIP_LATEST, Proto.T.CLIP_REQUEST,
+            Proto.T.FCLIP_OFFER, Proto.T.NOTIF, Proto.T.NOTIF_POLICY,
+        )
         @Volatile private var instance: Core? = null
         fun get(ctx: Context): Core = instance ?: synchronized(this) {
             instance ?: Core(ctx.applicationContext).also { instance = it; it.start() }

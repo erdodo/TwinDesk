@@ -1,7 +1,9 @@
 // TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE.
 // The JSON side of the pool (Mesh.kt is pure and never sees JSON): a pooled message on the wire is its
 // fields plus the stamps o (origin), s (sequence), d (the origin's direct links) and h (hops). A message
-// without o is an old peer's, and what an old peer gets carries no stamps (docs/mesh.md).
+// without s is an old peer's, and what an old peer gets carries no stamps (docs/mesh.md). Exception: a
+// clipboard item has `ts`, the time of its copy, and `o`, the device that copied: an old peer of the
+// latest-copy-wins kind sends and gets those two without the pool's stamps, so they stay in its body.
 package com.twindesk.android
 
 import org.json.JSONArray
@@ -10,9 +12,10 @@ import org.json.JSONObject
 private val STAMPS = setOf("o", "s", "d", "h")
 
 fun JSONObject.toPoolMsg(): PoolMsg {
+    val stamped = has("s") // the sequence number: an old peer's message has none
     val body = HashMap<String, Any?>()
-    keys().forEach { k -> if (k !in STAMPS) body[k] = opt(k)?.takeIf { it !== JSONObject.NULL } }
-    val origin = if (has("o") && !isNull("o")) optString("o") else null
+    keys().forEach { k -> if (k !in STAMPS || (k == "o" && !stamped)) body[k] = opt(k)?.takeIf { it !== JSONObject.NULL } }
+    val origin = if (stamped && has("o") && !isNull("o")) optString("o") else null
     val d = optJSONArray("d")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList()
     return PoolMsg(body, o = origin, s = optLong("s", 0L), d = d, h = optInt("h", 0))
 }
