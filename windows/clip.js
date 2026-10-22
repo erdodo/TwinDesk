@@ -1,6 +1,7 @@
 // TwinDesk — Copyright (C) 2026 inukaasith. GPL-3.0, see LICENSE.
 // Clipboard sharing — text, images and files: directions, switch/instant mode, concealed filter,
-// size limits, clip.policy both ways, and the in-memory Recent list (never on disk).
+// size limits, clip.policy both ways, and the Recent list (shared/clip-history.js: text in memory,
+// images and files kept in the app's cache folder so they can be copied again and previewed).
 // "The latest copy wins" (shared/clipsync.js): the clipboard is watched all the time, every copy
 // made here is stamped when it happens, and an item from the other computer is applied only when
 // it is newer than everything this PC knows of. Files copied normally (Explorer) are announced
@@ -11,13 +12,14 @@ const fs = require('fs');
 const path = require('path');
 const P = require('../shared/protocol.js');
 const S = require('../shared/clipsync.js');
+const { ClipHistory } = require('../shared/clip-history.js');
 
 // Newer Electron returns a Promise from clipboard.readText() in main; await works for both.
 const readText = async () => String((await clipboard.readText()) || '');
 const POLL_MS = 500; // how often the clipboard is checked for a new copy
 const IMAGE_POLL_MS = 1500; // an image on the clipboard is looked at this often at most (reading it is the costly part)
 const PRUNE_EVERY = 1200; // polls (10 minutes) between clean-ups of the received files
-const PREVIEW = 300; // characters kept per history item for the UI
+const THUMB_W = 64; // width of an image's thumbnail in the Recent list
 const MB = 1024 * 1024;
 const CACHE_KEEP = 3; // received file sets kept (the newest)
 const CACHE_AGE_MS = 60 * 60 * 1000; // …and any younger than this
@@ -73,7 +75,8 @@ class Clip {
     this.onChange = onChange;
     this.latest = new S.Latest({ selfId: selfId || crypto.randomUUID() });
     this.peerAccepts = true; // the Mac's last clip.policy
-    this.history = []; // newest first: {dir: 'out'|'in', at, text, size}
+    this.hist = new ClipHistory({ dir: '', max: 0 }); // the Recent list; dir is set by attachFiles
+    this.thumbs = new Map(); // history id -> thumbnail data URL
     this.lastSkip = '';
     this.poll = null;
     this.sig = null; // fingerprint of the clipboard as last seen (null = not looked at yet)
@@ -87,6 +90,7 @@ class Clip {
     this.helper = null;
     this.fileClip = null;
     this.cacheDir = '';
+    this.historyDir = '';
 
     link.on(P.T.CLIP, (m) => this._later(() => this._onClip(m)));
     link.on(P.T.CLIP_IMAGE, (m) => this._later(() => this._onImage(m)));
@@ -121,16 +125,19 @@ class Clip {
 
   // The helper (file list, CF_HDROP), FileClip (announce/fetch files) and the folder for received
   // files; set once they exist.
-  attachFiles({ helper, fileClip, cacheDir }) {
+  attachFiles({ helper, fileClip, cacheDir, historyDir }) {
     this.helper = helper;
     this.fileClip = fileClip;
     this.cacheDir = cacheDir;
+    this.historyDir = historyDir || path.join(path.dirname(cacheDir), 'cliphistory');
+    this.hist.dir = this.historyDir;
   }
 
   // Watch the clipboard from now on (always, so every copy is stamped even when nothing is sent).
   start() {
     if (this.poll) return;
     if (this.cacheDir) try { fs.rmSync(this.cacheDir, { recursive: true, force: true }); } catch (_) { /* leftovers */ }
+    this._wipeHistory(); // kept images and files of an earlier run
     this.poll = setInterval(() => {
       if (++this.ticks % PRUNE_EVERY === 0 && this.cacheDir) pruneCache(this.cacheDir);
       this.tick().catch(() => {});
@@ -144,10 +151,21 @@ class Clip {
     this.poll = null;
   }
 
+  // The app is quitting: nothing kept stays on disk.
+  shutdown() {
+    this.stop();
+    this._wipeHistory();
+  }
+
+  _wipeHistory() {
+    this.thumbs.clear();
+    try { this.hist.wipe(); } catch (_) { /* in use */ }
+  }
+
   // Call after settings.clipboard changed.
   applySettings() {
     const c = this.cfg;
-    if (c.historySize < this.history.length) this.history.length = c.historySize;
+    this.hist.setMax(c.historySize);
     this.sendPolicy();
     this.onChange();
   }
@@ -231,12 +249,11 @@ class Clip {
     return paths.length ? { kind: 'files', id: crypto.randomUUID(), paths } : null;
   }
 
-  _remember(dir, text) {
-    const n = this.cfg.historySize;
-    if (!n) return;
-    this.history = this.history.filter((h) => h.text !== text || h.dir !== dir);
-    this.history.unshift({ dir, at: Date.now(), text, size: Buffer.byteLength(text, 'utf8') });
-    if (this.history.length > n) this.history.length = n;
+  // Add to the Recent list (nothing at all when it is off).
+  _remember(entry) {
+    this.hist.max = this.cfg.historySize | 0;
+    if (!this.hist.max) return;
+    try { this.hist.add(entry); } catch (_) { /* unwritable cache: not listed */ }
   }
 
   // Send what this PC copied last, if allowed and not sent yet. Always with the time of the copy.
@@ -270,7 +287,7 @@ class Clip {
     }
     if (!this.link.send(S.textMessage(it.text, it.stamp))) return;
     it.sent = true;
-    this._remember('out', it.text);
+    this._remember({ kind: 'text', dir: 'out', text: it.text });
     this.lastSkip = '';
     this.onChange();
   }
@@ -282,13 +299,15 @@ class Clip {
       return this._skip('skipped a password (concealed item)');
     }
     const sz = it.image.getSize();
-    const msg = S.imageMessage({ id: it.id, w: sz.width, h: sz.height, png: it.image.toPNG() }, it.stamp);
+    const png = it.image.toPNG();
+    const msg = S.imageMessage({ id: it.id, w: sz.width, h: sz.height, png }, it.stamp);
     if (!msg) {
       it.sent = true;
       return this._skip('skipped an image (over ' + Math.round(P.CLIP_IMAGE_MAX_BYTES / MB) + ' MB)');
     }
     if (!this.link.send(msg)) return;
     it.sent = true;
+    this._remember({ kind: 'image', dir: 'out', png, w: sz.width, h: sz.height });
     this.lastSkip = '';
     this.onChange();
   }
@@ -297,7 +316,10 @@ class Clip {
     if (!c.files || !this.fileClip) return;
     const r = this.fileClip.announce(it.paths, it.stamp, it.id, c.filesMaxMB, true);
     it.sent = true; // announced (or nothing to announce)
-    if (r) this.lastSkip = '';
+    if (r) {
+      this.lastSkip = '';
+      if (!it.again) this._remember({ kind: 'files', dir: 'out', files: it.paths.map((p) => ({ path: p })) }); // a copy of the list's own files is already listed
+    }
     this.onChange();
   }
 
@@ -342,7 +364,7 @@ class Clip {
     await this._apply(async () => {
       if ((await readText()) !== m.text) clipboard.writeText(m.text);
     });
-    this._remember('in', m.text);
+    this._remember({ kind: 'text', dir: 'in', text: m.text });
     this.onChange();
   }
 
@@ -355,6 +377,7 @@ class Clip {
     if (im.isEmpty()) return;
     if (!(await this._accept(m, 'image', img.id))) return;
     await this._apply(() => clipboard.writeImage(im));
+    this._remember({ kind: 'image', dir: 'in', png: img.png, w: img.w, h: img.h });
     this.onChange();
   }
 
@@ -384,29 +407,67 @@ class Clip {
     const cur = this.latest.cur;
     if (mine && b.ok && Array.isArray(b.placed) && b.placed.length && cur && cur.id === b.batch) {
       this.item = { kind: 'files', id: b.batch, stamp: { ts: cur.ts, o: cur.o }, sent: true, received: true };
-      this._later(() => this._apply(() => this.helper.setFileDrop(b.placed)).then(() => this.onChange()));
+      this._later(() => this._apply(() => this.helper.setFileDrop(b.placed)).then(() => {
+        this._remember({ kind: 'files', dir: 'in', files: b.placed.map((p) => ({ path: p })) });
+        this.onChange();
+      }));
     }
     return true;
   }
 
-  // Put a Recent item back on the clipboard (a new copy: it goes out by the normal rules).
-  copyHistory(index) {
-    const h = this.history[index];
-    if (!h) return;
-    clipboard.writeText(h.text);
-    this.tick().catch(() => {});
+  // Put a Recent item back on the clipboard as a new copy: stamped now, so it goes out by the
+  // normal rules and wins over older ones. False when it is not kept (or gone).
+  copyHistory(id) {
+    return this._later(async () => {
+      const c = this.hist.content(id);
+      if (!c) return false;
+      if (this.busy) await this.busy.catch(() => {}); // a copy being noticed is stamped first
+      await this._apply(async () => {
+        if (c.kind === 'text') clipboard.writeText(c.text);
+        else if (c.kind === 'image') clipboard.writeImage(nativeImage.createFromBuffer(c.png));
+        else await this.helper.setFileDrop(c.paths);
+      });
+      const item = c.kind === 'text' ? { kind: 'text', id: md5(c.text).slice(0, 16), text: c.text, concealed: false }
+        : c.kind === 'image' ? { kind: 'image', id: md5(c.png).slice(0, 16), image: nativeImage.createFromBuffer(c.png), concealed: false }
+          : { kind: 'files', id: crypto.randomUUID(), paths: c.paths, again: true };
+      item.stamp = this.latest.copied(item.kind, item.id);
+      item.sent = false;
+      this.item = item;
+      if (this.cfg.mode === 'instant') await this._sendPending();
+      this.onChange();
+      return true;
+    });
+  }
+
+  // Everything of one Recent item for the Preview window (null = gone).
+  previewHistory(id) {
+    return this.hist.preview(id);
   }
 
   clearHistory() {
-    this.history = [];
+    this._wipeHistory();
     this.onChange();
   }
 
+  // A small picture for an image row, made once per item.
+  _thumb(id) {
+    if (this.thumbs.has(id)) return this.thumbs.get(id);
+    let url = '';
+    try {
+      const c = this.hist.content(id);
+      if (c) url = nativeImage.createFromBuffer(c.png).resize({ width: THUMB_W }).toDataURL();
+    } catch (_) { /* no thumbnail */ }
+    this.thumbs.set(id, url);
+    return url;
+  }
+
   get view() {
+    const rows = this.hist.list();
+    for (const id of this.thumbs.keys()) if (!rows.some((r) => r.id === id)) this.thumbs.delete(id);
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
-      history: this.history.map((h) => ({ dir: h.dir, at: h.at, size: h.size, text: h.text.slice(0, PREVIEW) })),
+      history: rows.map((r) => (r.kind === 'image' && r.kept ? { ...r, thumb: this._thumb(r.id) } : r)),
     };
   }
 }

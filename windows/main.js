@@ -223,7 +223,7 @@ function start() {
   // A paste Windows copies itself (dragrecv.js) — its files skip filerecv.js.
   fileRecv.claims = (m) => dragRecv._pasteOf(m);
   dragRecv.onPasted = (b) => fileClip.pasted(b);
-  clip.attachFiles({ helper, fileClip, cacheDir: path.join(app.getPath('userData'), 'clipfiles') });
+  clip.attachFiles({ helper, fileClip, cacheDir: path.join(app.getPath('userData'), 'clipfiles'), historyDir: path.join(app.getPath('userData'), 'cliphistory') });
   clip.start(); // every copy is stamped from here on (clipsync.js)
   kvm.fileClip = fileClip; // Our copy/paste shortcut while driving → fclip.key
   sendTo = new SendTo({ link, fileDrop, peerName: () => (peerView() || {}).name || '', popup: (kind, text, sub) => hud.show(kind, text, sub) });
@@ -1010,6 +1010,7 @@ app.on('before-quit', () => {
   if (pcApps) pcApps.shutdown();
   if (peerApps) peerApps.shutdown();
   if (fileClip) fileClip.shutdown();
+  if (clip) clip.shutdown(); // kept Recent images and files go
   if (phoneViews) phoneViews.shutdown();
   if (wired) wired.stop();
   if (phoneDrive) phoneDrive.shutdown();
