@@ -2,4 +2,6 @@
 <paths>
     <!-- Files copied on the computer, waiting on the clipboard (FileClip). -->
     <cache-path name="clip" path="clip/" />
+    <!-- The Recent list's kept images and files, to copy them again (ClipHistory.kt). -->
+    <cache-path name="cliphist" path="clip-history/" />
 </paths>
