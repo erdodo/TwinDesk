@@ -57,11 +57,52 @@ UI.tab({
       UI.card('Privacy', [
         UI.row('Skip passwords', 'From password managers', [concealed]),
         UI.row('Largest item', '', [maxKB]),
-        UI.row('Recent items', 'Never saved to disk', [historySize]),
+        UI.row('Recent items', 'Text stays in memory; images and files are kept in the app’s cache folder until you clear them or quit', [historySize]),
       ]),
       skipNote,
       UI.card('Recent', [list], { actions: [clearBtn] }),
     );
+
+    // Preview: the whole item in an overlay card (full text, full image, every file) with Copy and Close.
+    const closePreview = () => document.querySelector('.hist-modal')?.remove();
+    async function openPreview(h) {
+      closePreview();
+      const p = await api.previewHistory(h.id);
+      if (!p) return;
+      let content;
+      if (p.kind === 'text') content = el('pre', { class: 'hist-full selectable', text: p.text });
+      else if (p.kind === 'image') {
+        content = p.image
+          ? el('img', { class: 'hist-img', src: p.image, alt: 'Image ' + p.w + '×' + p.h })
+          : el('div', { class: 'hint', text: 'Image ' + p.w + '×' + p.h + ' (too big to show)' });
+      } else {
+        content = el('div', { class: 'hist-files' }, [
+          ...p.files.map((f) => el('div', { class: 'hist-file' }, [
+            UI.icon(f.dir ? 'folder' : 'doc'),
+            el('span', { class: 'hist-file-name selectable', text: f.name }),
+            el('span', { class: 'hint', text: f.dir ? '' : UI.bytes(f.size) }),
+          ])),
+          p.more ? el('div', { class: 'hint', text: '+' + p.more + ' more' }) : null,
+        ]);
+      }
+      const copy = UI.button('Copy', async () => { await api.copyHistory(h.id); closePreview(); }, 'primary');
+      copy.disabled = !p.kept;
+      if (!p.kept) copy.title = 'Too big to keep, so it cannot be copied again';
+      const modal = el('div', { class: 'hist-modal' }, [
+        el('div', { class: 'hist-card', attrs: { role: 'dialog', 'aria-modal': 'true' } }, [
+          el('div', { class: 'hist-card-head', text: h.title }),
+          el('div', { class: 'hist-card-body' }, [content]),
+          el('div', { class: 'hist-card-foot' }, [copy, UI.button('Close', closePreview)]),
+        ]),
+      ]);
+      modal.onclick = (e) => { if (e.target === modal) closePreview(); };
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key !== 'Escape') return;
+        document.removeEventListener('keydown', esc);
+        closePreview();
+      });
+      document.body.append(modal);
+    }
 
     let lastKey = '';
     return (s) => {
@@ -83,17 +124,20 @@ UI.tab({
       skipNote.set(c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
       clearBtn.disabled = !c.history.length;
 
-      const key = JSON.stringify(c.history.map((h) => [h.at, h.dir])) + c.historySize + Math.floor(Date.now() / 15000);
+      const key = JSON.stringify(c.history.map((h) => [h.id, h.kept])) + c.historySize + Math.floor(Date.now() / 15000);
       if (key === lastKey) return;
       lastKey = key;
       list.replaceChildren(...(c.history.length
-        ? c.history.map((h, i) => el('div', { class: 'hist-item' }, [
+        ? c.history.map((h) => el('div', { class: 'hist-item' }, [
           el('span', { class: 'hist-dir ' + h.dir, title: h.dir === 'out' ? 'Sent to {name}' : 'From {name}' }, [UI.icon(h.dir === 'out' ? 'up' : 'down')]),
+          h.kind === 'image' && h.thumb ? el('img', { class: 'hist-thumb', src: h.thumb, alt: '' })
+            : el('span', { class: 'hist-kind' }, [UI.icon(h.kind === 'image' ? 'photo' : h.kind === 'files' ? 'doc' : 'clipboard')]),
           el('div', { class: 'hist-text' }, [
-            el('div', { class: 'hist-preview selectable', text: h.text.replace(/\s+/g, ' ').trim() || '(whitespace)' }),
-            el('div', { class: 'hint', text: (h.dir === 'out' ? 'To {name}' : 'From {name}') + ' · ' + UI.ago(h.at) + ' · ' + UI.bytes(h.size) }),
+            el('div', { class: 'hist-preview selectable', text: h.title }),
+            el('div', { class: 'hint', text: (h.dir === 'out' ? 'To {name}' : 'From {name}') + ' · ' + UI.ago(h.at) + ' · ' + UI.bytes(h.size) + (h.sub ? ' · ' + h.sub : '') }),
           ]),
-          UI.button('Copy', () => api.copyHistory(i), 'small'),
+          UI.button('Preview', () => openPreview(h), 'small'),
+          Object.assign(UI.button('Copy', () => api.copyHistory(h.id), 'small'), h.kept ? {} : { disabled: true, title: 'Too big to keep, so it cannot be copied again' }),
         ]))
         : [UI.row(c.historySize ? 'Nothing yet' : 'Recent items are off', '')]));
     };
