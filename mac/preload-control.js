@@ -20,6 +20,7 @@ const ACTIONS = [
 const api = {
   getState: () => ipcRenderer.invoke('getState'),
   phoneAssets: () => ipcRenderer.invoke('phoneAssets'),
+  previewHistory: (id) => ipcRenderer.invoke('previewHistory', id), // a Recent item in full
   onState: (fn) => ipcRenderer.on('state', (_e, s) => fn(s)),
   onHub: (fn) => ipcRenderer.on('hub', (_e, m) => fn(m)), // the phone's answers for Calls, Messages and Photos
   onGo: (fn) => ipcRenderer.on('go', (_e, tab) => fn(tab)), // show a page (the call window's Calls)

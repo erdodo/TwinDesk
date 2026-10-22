@@ -98,7 +98,8 @@ function setupIpc(ctx) {
   handle('openLink', (key) => Object.hasOwn(LINKS, key) && shell.openExternal(LINKS[key])); // About page: only its own links
   handle('setMonitor', (partial) => change('monitor', partial, () => screen.applyAudio()));
   handle('setClipboard', (partial) => change('clipboard', partial, () => clip.applySettings()));
-  handle('copyHistory', (index) => clip.copyHistory(Number(index)));
+  handle('copyHistory', (id) => clip.copyHistory(String(id)));
+  handle('previewHistory', (id) => clip.previewHistory(String(id)));
   handle('clearHistory', () => clip.clearHistory());
   handle('setTab', (tab) => change('ui', { tab })); // invalid names fall back in normalize()
   handle('setAudio', (partial) => change('audio', partial, () => sound.apply()));

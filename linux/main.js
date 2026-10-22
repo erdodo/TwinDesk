@@ -1074,6 +1074,7 @@ app.on('before-quit', () => {
   theme.stop();
   saveBounds();
   if (discovery) discovery.stop();
+  if (clip) clip.shutdown();
   if (pcScreen) pcScreen.shutdown();
   if (pcApps) pcApps.shutdown();
   if (peerApps) peerApps.shutdown();

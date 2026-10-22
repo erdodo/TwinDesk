@@ -2,7 +2,8 @@
 // Clipboard sharing (text, images, files) across every connected device (docs/mesh.md, one pool): a
 // copy goes to the devices that accept clipboard from us, an item from any device is applied once
 // and relayed by the Pool. Directions, switch/instant mode, concealed filter, size limits,
-// clip.policy per device and the in-memory Recent list. "The latest copy wins": every local copy is
+// clip.policy per device and the Recent list (shared/clip-history.js: text in memory, images and files
+// kept in the app's cache folder so they can be copied again and previewed). "The latest copy wins": every local copy is
 // noticed as it happens (the helper watches NSPasteboard.changeCount) and stamped with
 // shared/clipsync.js, so a late or repeated push of an older copy never replaces a newer one (the
 // Pool's (origin, sequence) dedupe is the first filter, the time decides what wins).
@@ -13,12 +14,16 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
+const os = require('os');
 const { EventEmitter } = require('events');
 const P = require('../shared/protocol.js');
 const { Pool } = require('../shared/mesh.js');
 const { Latest, textMessage, imageMessage, readImage } = require('../shared/clipsync.js');
+const { ClipHistory } = require('../shared/clip-history.js');
 
-const PREVIEW = 300; // characters kept per history item for the UI
+const THUMB = 64; // width of an image's thumbnail in the Recent list
+
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
 
 // The Pool's view of the mesh for the clipboard. Items from a device are always applied (its
@@ -34,6 +39,15 @@ function clipPeers(mesh) {
   }));
 }
 
+// The Recent list's folder: inside the app's cache; a temp folder where there is no Electron app (tests).
+function defaultHistoryDir() {
+  try {
+    return path.join(require('electron').app.getPath('userData'), 'clipboard-history');
+  } catch {
+    return path.join(os.tmpdir(), `twindesk-clipboard-history-${process.pid}`);
+  }
+}
+
 class Clipboard extends EventEmitter {
   // opts:
   //   bus      { on(type, fn(msg, fromId)), onPeer(event, fn(peerId, info)), send(peerId, msg) -> bool,
@@ -43,6 +57,7 @@ class Clipboard extends EventEmitter {
   //   helper   the helper process {running, send(name, args), request(name, args) -> Promise,
   //            on('event' | 'ready')}: 'clipboard' events (every copy) and 'clipboardInfo'
   //   clipboard, nativeImage   optional; default Electron's
+  //   historyDir   where the Recent list keeps images and files (default: the app's cache folder)
   constructor(opts) {
     super();
     this.bus = opts.bus;
@@ -61,7 +76,9 @@ class Clipboard extends EventEmitter {
     this.chain = Promise.resolve(); // detections and sends one after the other
     this.fileClip = null; // fclip.js: announces and fetches copied files
     this.offers = new Map(); // fclip.offer id -> true/false: Latest's answer, so two handlers ask it once
-    this.history = []; // newest first: {dir, at, text, size}
+    this.hist = new ClipHistory({ dir: opts.historyDir || defaultHistoryDir(), max: Number(this.cfg.historySize) || 0 });
+    this.hist.wipe(); // nothing from an earlier run stays on disk
+    this.thumbs = new Map(); // history id -> thumbnail data URL
     this.lastSkip = '';
 
     const bus = this.bus;
@@ -129,7 +146,7 @@ class Clipboard extends EventEmitter {
   applySettings() {
     const c = this.cfg;
     this._applyWatch();
-    if (c.historySize < this.history.length) this.history.length = c.historySize;
+    this.hist.setMax(Number(c.historySize) || 0);
     this.sendPolicy();
     this.emit('change');
   }
@@ -170,12 +187,15 @@ class Clipboard extends EventEmitter {
     return (f && f.name) || from;
   }
 
-  _remember(dir, text, from) {
-    const n = this.cfg.historySize;
-    if (!n) return;
-    this.history = this.history.filter((h) => h.text !== text || h.dir !== dir);
-    this.history.unshift({ dir, at: Date.now(), text, size: Buffer.byteLength(text, 'utf8'), from: from || '' });
-    if (this.history.length > n) this.history.length = n;
+  // Record an item in the Recent list (both directions); from: the name of the device it came from.
+  _remember(entry, from) {
+    try {
+      const id = this.hist.add({ at: Date.now(), ...entry });
+      const it = id && this.hist.get(id);
+      if (it && from) it.from = from;
+    } catch (e) {
+      console.error(`[clipboard] history: ${e.message}`);
+    }
   }
 
   _queue(fn) {
@@ -255,7 +275,7 @@ class Clipboard extends EventEmitter {
       this.clipboard.writeText(msg.text);
       await this._wrote();
     }
-    this._remember('in', msg.text, this._nameOf(r.msg.o, msg.on, from));
+    this._remember({ kind: 'text', dir: 'in', text: msg.text }, this._nameOf(r.msg.o, msg.on, from));
     this.emit('change');
   }
 
@@ -280,6 +300,7 @@ class Clipboard extends EventEmitter {
     this.item = { kind: 'image', sig, w: img.w, h: img.h, png: null, stamp: this._stampNow(), sent: true };
     this.applied = sig;
     await this._wrote();
+    this._remember({ kind: 'image', dir: 'in', png: img.png, w: img.w, h: img.h }, this._nameOf(r.msg.o, null, from));
     this.emit('change');
   }
 
@@ -312,6 +333,9 @@ class Clipboard extends EventEmitter {
     } catch (e) {
       console.error(`[clipboard] files: ${e.message}`);
     }
+    const cur2 = this.latest.cur;
+    this._remember({ kind: 'files', dir: 'in', files: paths.map((p) => ({ path: p })) }, cur2 ? this._nameOf(cur2.o, null, cur2.o) : '');
+    this.emit('change');
   }
 
   // After our own write: the pasteboard's count, so the change is not taken for a new copy.
@@ -359,7 +383,7 @@ class Clipboard extends EventEmitter {
         return this._skip(`skipped ${Math.round(Buffer.byteLength(it.text, 'utf8') / 1024)} KB (over ${c.maxKB} KB)`);
       }
       if (!this.pool.publish(textMessage(it.text, it.stamp)).sent.length) return;
-      this._remember('out', it.text);
+      if (!it.fromHistory) this._remember({ kind: 'text', dir: 'out', text: it.text });
     } else if (it.kind === 'image') {
       if (!c.images) return;
       const msg = it.png && imageMessage({ id: it.sig.slice(2), w: it.w, h: it.h, png: it.png }, it.stamp);
@@ -368,6 +392,7 @@ class Clipboard extends EventEmitter {
         return this._skip(`skipped an image of ${Math.round(it.bytes / 1048576)} MB (over ${Math.round(P.CLIP_IMAGE_MAX_BYTES / 1048576)} MB)`);
       }
       if (!this.pool.publish(msg).sent.length) return;
+      if (!it.fromHistory) this._remember({ kind: 'image', dir: 'out', png: it.png, w: it.w, h: it.h });
     } else if (it.kind === 'files') {
       if (!c.files || !this.fileClip) return;
       // Straight to every device that takes files; each fetches them from us over its own link.
@@ -377,6 +402,7 @@ class Clipboard extends EventEmitter {
       });
       if (!to.length) return;
       await this.fileClip.announceClipboard(it.paths, it.stamp, c.filesMaxMB, to);
+      if (!it.fromHistory) this._remember({ kind: 'files', dir: 'out', files: it.paths.map((p) => ({ path: p })) });
     }
     it.sent = true;
     this.lastSkip = '';
@@ -390,25 +416,85 @@ class Clipboard extends EventEmitter {
     }
   }
 
-  // Put a Recent item back on the clipboard (it then goes out by the normal rules).
-  copyHistory(index) {
-    const h = this.history[index];
-    if (!h) return;
-    this.clipboard.writeText(h.text); // the watcher takes it for a new copy
+  // Put a Recent item back on the clipboard as a new copy: stamped now, so it goes out to the pool by
+  // the normal rules and wins over older copies. Nothing happens when it was not kept.
+  copyHistory(id) {
+    return this._queue(() => this._copyHistory(id));
   }
 
-  clearHistory() {
-    this.history = [];
+  async _copyHistory(id) {
+    const c = this.hist.content(String(id));
+    if (!c) return;
+    await this._poll(); // a copy made just now is stamped before this one
+    let item;
+    if (c.kind === 'text') {
+      this.clipboard.writeText(c.text);
+      item = { kind: 'text', sig: `t:${c.text}`, text: c.text };
+      await this._wrote();
+    } else if (c.kind === 'image') {
+      const pic = this.nativeImage.createFromBuffer(c.png);
+      if (pic.isEmpty()) return;
+      this.clipboard.writeImage(pic);
+      const sig = `i:${sha1(this.clipboard.readImage().toPNG())}`; // the pasteboard re-encodes it
+      item = { kind: 'image', sig, w: c.w, h: c.h, bytes: c.png.length, png: c.png.length <= P.CLIP_IMAGE_MAX_BYTES ? c.png : null };
+      await this._wrote();
+    } else {
+      try {
+        this.ownCount = (await this.helper.request('clipboardFiles', { paths: c.paths })).changeCount;
+      } catch (e) {
+        return console.error(`[clipboard] files: ${e.message}`);
+      }
+      item = { kind: 'files', sig: `f:${c.paths.join('\n')}`, paths: c.paths };
+    }
+    this.applied = item.sig; // the watcher reports our own write: not a second copy
+    item.concealed = false;
+    item.sent = false;
+    item.fromHistory = true; // already in the list
+    item.stamp = this.latest.copied(item.kind, item.kind === 'image' ? item.sig.slice(2) : undefined);
+    this.item = item;
+    if (item.kind !== 'files' && this.fileClip) this.fileClip.retractAuto();
+    if (this.cfg.mode === 'instant') await this._send('instant');
     this.emit('change');
   }
 
+  // Everything of one Recent item for the Preview window (plain JSON), or null.
+  previewHistory(id) {
+    return this.hist.preview(String(id));
+  }
+
+  clearHistory() {
+    this.hist.clear();
+    this.thumbs.clear();
+    this.emit('change');
+  }
+
+  // The app is quitting: kept images and files go.
+  shutdown() {
+    this.hist.wipe();
+  }
+
+  _thumb(id) {
+    if (this.thumbs.has(id)) return this.thumbs.get(id);
+    let url = '';
+    try {
+      const c = this.hist.content(id);
+      if (c && c.png) url = this.nativeImage.createFromBuffer(c.png).resize({ width: THUMB }).toDataURL();
+    } catch { /* no thumbnail */ }
+    this.thumbs.set(id, url);
+    return url;
+  }
+
   get view() {
+    const history = this.hist.list();
+    const live = new Set(history.map((h) => h.id));
+    for (const id of this.thumbs.keys()) if (!live.has(id)) this.thumbs.delete(id);
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
-      history: this.history.map((h) => ({
-        dir: h.dir, at: h.at, size: h.size, text: h.text.slice(0, PREVIEW), from: h.from || '',
-      })),
+      history: history.map((h) => {
+        const from = (this.hist.get(h.id) || {}).from || '';
+        return h.kind === 'image' && h.kept ? { ...h, from, thumb: this._thumb(h.id) } : { ...h, from };
+      }),
     };
   }
 }

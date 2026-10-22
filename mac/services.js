@@ -110,6 +110,7 @@ function startServices({ server, getSettings, pushState, onHelperReady, hub: mes
       pcApps.shutdown();
       appSend.shutdown();
       kvm.shutdown();
+      clipboard.shutdown(); // the Recent list's images and files go
       hub.shutdown(); // unmute this Mac if we muted it while sending
       stream.stop('off');
       helper.stop(); // closes stdin: the helper exits and the virtual display goes away

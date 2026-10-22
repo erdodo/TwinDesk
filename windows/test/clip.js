@@ -10,7 +10,7 @@ const Module = require('module');
 // ---- electron stub ----
 const state = { text: '', image: null, buffers: {} };
 const png = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24, n)]);
-const fakeImage = (buf) => ({ isEmpty: () => !buf || !buf.length, getSize: () => ({ width: 4, height: 2 }), toBitmap: () => buf, toPNG: () => buf });
+const fakeImage = (buf) => ({ isEmpty: () => !buf || !buf.length, getSize: () => ({ width: 4, height: 2 }), toBitmap: () => buf, toPNG: () => buf, resize: () => ({ toDataURL: () => 'data:image/png;base64,thumb' }) });
 const electron = {
   clipboard: {
     availableFormats: () => [...(state.text ? ['text/plain'] : []), ...(state.image ? ['image/png'] : [])],
@@ -66,6 +66,7 @@ function make(cfg, id = 'win') {
       notice: () => {},
     },
     cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), 'clip-test-')),
+    historyDir: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'clip-hist-')), 'cliphistory'),
   });
   const deliver = (m) => { for (const f of handlers[m.t] || []) f(m, 'mac'); };
   const welcome = () => { for (const f of peerHandlers.welcome || []) f('mac', {}); };
@@ -259,6 +260,140 @@ async function test(name, fn) {
     Clip.pruneCache(dir, t0);
     const left = fs.readdirSync(dir).sort();
     assert.deepStrictEqual(left, ['fresh', 'set4', 'set5']);
+  });
+
+  // ---- Recent list: kept data, copy again, preview ----
+  const sendsOf = (w, t) => w.sent.filter((m) => m.t === t);
+
+  await test('history: text, image and files are recorded in both directions', async () => {
+    const w = make(settings());
+    await w.clip.tick();
+    state.text = 'sent text'; now += 1000;
+    await w.clip.tick();
+    state.text = ''; state.image = png(1); now += 1000;
+    await w.clip.tick();
+    const f = path.join(w.clip.cacheDir, 'report.pdf');
+    fs.mkdirSync(w.clip.cacheDir, { recursive: true });
+    fs.writeFileSync(f, 'pdf');
+    state.files = [f]; state.buffers = { FileNameW: Buffer.from(f) }; now += 1000;
+    await w.clip.tick();
+    w.deliver({ t: 'clip', text: 'got text', ts: now + 5000, o: 'mac' });
+    await settle(w.clip);
+    w.deliver({ t: 'clip.image', id: 'im9', w: 4, h: 2, png: png(9).toString('base64'), ts: now + 6000, o: 'mac' });
+    await settle(w.clip);
+    const got = path.join(w.clip.cacheDir, 'off1', 'in.txt');
+    fs.mkdirSync(path.dirname(got), { recursive: true });
+    fs.writeFileSync(got, 'incoming');
+    assert.ok(w.clip.latest.accept({ ts: now + 7000, o: 'mac' }, 'files', 'off1'));
+    w.clip.fileOffered({ id: 'off1', bytes: 8, files: 1 }, { eager: true });
+    w.clip.filesArrived({ quiet: true, batch: 'off1', ok: true, placed: [got] });
+    await settle(w.clip);
+    const rows = w.clip.view.history;
+    assert.deepStrictEqual(rows.map((r) => r.kind + ':' + r.dir), ['files:in', 'image:in', 'text:in', 'files:out', 'image:out', 'text:out']);
+    assert.strictEqual(rows[0].title, 'in.txt');
+    assert.strictEqual(rows[3].title, 'report.pdf');
+    assert.strictEqual(rows[1].title, 'Image 4×2');
+    assert.ok(rows[1].thumb && rows[1].thumb.startsWith('data:image/'));
+    assert.ok(rows.every((r) => r.kept));
+    const pv = w.clip.previewHistory(rows[4].id);
+    assert.ok(pv.image.startsWith('data:image/png;base64,'));
+    assert.deepStrictEqual(w.clip.previewHistory(rows[0].id).files.map((x) => x.name), ['in.txt']);
+  });
+
+  await test('copyHistory: puts the item back as a new copy that is sent, text image and files', async () => {
+    const w = make(settings());
+    await w.clip.tick();
+    state.text = 'one'; now += 1000;
+    await w.clip.tick();
+    state.text = ''; state.image = png(5); now += 1000;
+    await w.clip.tick();
+    const f = path.join(w.clip.cacheDir, 'a.txt');
+    fs.mkdirSync(w.clip.cacheDir, { recursive: true });
+    fs.writeFileSync(f, 'hi');
+    state.files = [f]; state.buffers = { FileNameW: Buffer.from(f) }; now += 1000;
+    await w.clip.tick();
+    const rows = w.clip.view.history;
+    const text = rows.find((r) => r.kind === 'text');
+    const image = rows.find((r) => r.kind === 'image');
+    const files = rows.find((r) => r.kind === 'files');
+    // text
+    w.sent.length = 0; now += 1000;
+    assert.strictEqual(await w.clip.copyHistory(text.id), true);
+    assert.strictEqual(state.text, 'one');
+    const m = sendsOf(w, 'clip')[0];
+    assert.ok(m && m.text === 'one' && m.ts >= now && m.o === 'win');
+    now += 1000;
+    await w.clip.tick(); await w.clip.tick();
+    assert.strictEqual(sendsOf(w, 'clip').length, 1); // no echo, no second stamp
+    assert.strictEqual(w.clip.latest.cur.ts, m.ts);
+    // image
+    now += 1000;
+    assert.strictEqual(await w.clip.copyHistory(image.id), true);
+    assert.ok(state.image.equals(png(5)));
+    const im = sendsOf(w, 'clip.image')[0];
+    assert.ok(im && im.ts > m.ts && Buffer.from(im.png, 'base64').equals(png(5)));
+    await w.clip.tick();
+    assert.strictEqual(sendsOf(w, 'clip.image').length, 1);
+    // files: the kept copy goes back on the clipboard and is announced, not listed twice
+    now += 1000;
+    const before = w.clip.view.history.filter((r) => r.kind === 'files').length;
+    assert.strictEqual(await w.clip.copyHistory(files.id), true);
+    assert.strictEqual(w.calls.drop.length, 1);
+    assert.notStrictEqual(w.calls.drop[0][0], f); // the kept copy, not the original
+    assert.ok(fs.existsSync(w.calls.drop[0][0]));
+    assert.strictEqual(w.calls.announce.length, 2);
+    assert.ok(w.calls.announce[1].stamp.ts > im.ts);
+    await w.clip.tick();
+    assert.strictEqual(w.calls.announce.length, 2);
+    assert.strictEqual(w.clip.view.history.filter((r) => r.kind === 'files').length, before);
+  });
+
+  await test('copyHistory: an item that was not kept cannot be copied', async () => {
+    const w = make(settings());
+    w.clip.hist.maxBytes = 40; // an image over a quarter of this is listed, not kept
+    await w.clip.tick();
+    state.image = png(2); now += 1000;
+    await w.clip.tick();
+    const row = w.clip.view.history[0];
+    assert.strictEqual(row.kind, 'image');
+    assert.strictEqual(row.kept, false);
+    assert.strictEqual(row.thumb, undefined);
+    state.text = 'other'; now += 1000;
+    assert.strictEqual(await w.clip.copyHistory(row.id), false);
+    assert.strictEqual(state.text, 'other');
+    assert.strictEqual(await w.clip.copyHistory('nope'), false);
+  });
+
+  await test('historySize 0 keeps nothing and writes nothing to disk', async () => {
+    const w = make(settings({ historySize: 0 }));
+    await w.clip.tick();
+    state.text = 'x'; now += 1000;
+    await w.clip.tick();
+    state.image = png(3); now += 1000;
+    await w.clip.tick();
+    assert.deepStrictEqual(w.clip.view.history, []);
+    assert.ok(!fs.existsSync(w.clip.historyDir));
+  });
+
+  await test('history folder is wiped when the app starts, on Clear and on quit', async () => {
+    const w = make(settings());
+    fs.mkdirSync(path.join(w.clip.historyDir, 'old'), { recursive: true });
+    fs.writeFileSync(path.join(w.clip.historyDir, 'old', 'x'), 'left over');
+    w.clip.start();
+    w.clip.stop();
+    assert.ok(!fs.existsSync(w.clip.historyDir));
+    await w.clip.tick();
+    state.image = png(7); now += 1000;
+    await w.clip.tick();
+    assert.ok(fs.readdirSync(w.clip.historyDir).length);
+    w.clip.clearHistory();
+    assert.deepStrictEqual(w.clip.view.history, []);
+    assert.ok(!fs.existsSync(w.clip.historyDir));
+    w.clip.img = null; state.image = png(8); now += 1000;
+    await w.clip.tick();
+    assert.ok(fs.existsSync(w.clip.historyDir));
+    w.clip.shutdown();
+    assert.ok(!fs.existsSync(w.clip.historyDir));
   });
 
   console.log(n + ' passed' + (process.exitCode ? ', some FAILED' : ''));

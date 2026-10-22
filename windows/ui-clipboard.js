@@ -55,11 +55,49 @@ UI.tab({
       UI.card('Privacy', [
         UI.row('Skip passwords', 'From password managers', [concealed]),
         UI.row('Largest item', '', [maxKB]),
-        UI.row('Recent items', 'Never saved to disk', [historySize]),
+        UI.row('Recent items', 'Text stays in memory; images and files are kept in the app’s cache folder until you clear them or quit', [historySize]),
       ]),
       skipNote,
       UI.card('Recent', [list], { actions: [clearBtn] }),
     );
+
+    // The whole item in an overlay card: full text, the image scaled to fit, every file and folder.
+    const preview = async (h) => {
+      const p = await api.previewHistory(h.id);
+      if (!p) return;
+      const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+      const onKey = (e) => { if (e.key === 'Escape') close(); };
+      let content;
+      if (p.kind === 'text') content = el('pre', { class: 'prev-text selectable', text: p.text });
+      else if (p.kind === 'image') {
+        content = p.image
+          ? el('img', { class: 'prev-image', src: p.image, alt: 'Image ' + p.w + '×' + p.h })
+          : el('div', { class: 'hint', text: 'Too big to show' });
+      } else {
+        content = el('div', { class: 'prev-files' }, [
+          ...p.files.map((f) => el('div', { class: 'prev-file' }, [
+            UI.icon(f.dir ? 'folder' : 'doc'),
+            el('span', { class: 'prev-name selectable', text: f.name }),
+            el('span', { class: 'hint', text: f.dir ? 'Folder' : UI.bytes(f.size) }),
+          ])),
+          p.more ? el('div', { class: 'hint', text: '+' + p.more + ' more' }) : null,
+        ]);
+      }
+      const copyBtn = UI.button('Copy', async () => { await api.copyHistory(h.id); close(); }, 'small');
+      copyBtn.disabled = !h.kept;
+      const overlay = el('div', { class: 'prev-overlay', onclick: (e) => { if (e.target === overlay) close(); } }, [
+        el('div', { class: 'prev-card', role: 'dialog' }, [
+          el('div', { class: 'prev-head' }, [
+            el('b', { text: h.title }),
+            el('span', { class: 'hint', text: UI.fill((p.dir === 'out' ? 'To {name}' : 'From {name}') + ' · ' + UI.ago(p.at) + ' · ' + UI.bytes(p.size)) }),
+          ]),
+          el('div', { class: 'prev-body' }, [content]),
+          el('div', { class: 'prev-foot' }, [copyBtn, UI.button('Close', close, 'small')]),
+        ]),
+      ]);
+      document.addEventListener('keydown', onKey);
+      document.body.append(overlay);
+    };
 
     let lastKey = '';
     return (s) => {
@@ -80,17 +118,25 @@ UI.tab({
       skipNote.set(c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
       clearBtn.disabled = !c.history.length;
 
-      const key = JSON.stringify(c.history.map((h) => [h.at, h.dir])) + c.historySize + Math.floor(Date.now() / 15000);
+      const key = JSON.stringify(c.history.map((h) => [h.id, h.dir, h.kept])) + c.historySize + Math.floor(Date.now() / 15000);
       if (key === lastKey) return;
       lastKey = key;
       list.replaceChildren(...(c.history.length
-        ? c.history.map((h, i) => el('div', { class: 'hist-item' }, [
+        ? c.history.map((h) => el('div', { class: 'hist-item' }, [
           el('span', { class: 'hist-dir ' + h.dir, title: h.dir === 'out' ? 'Sent to {name}' : 'From {name}' }, [UI.icon(h.dir === 'out' ? 'up' : 'down')]),
+          h.thumb ? el('img', { class: 'hist-thumb', src: h.thumb, alt: '' })
+            : el('span', { class: 'hist-kind' }, [h.kind === 'text' ? null : UI.icon(h.kind === 'image' ? 'photo' : 'doc')]),
           el('div', { class: 'hist-text' }, [
-            el('div', { class: 'hist-preview selectable', text: h.text.replace(/\s+/g, ' ').trim() || '(whitespace)' }),
-            el('div', { class: 'hint', text: (h.dir === 'out' ? 'To {name}' : 'From {name}') + ' · ' + UI.ago(h.at) + ' · ' + UI.bytes(h.size) }),
+            el('div', { class: 'hist-preview selectable', text: h.title }),
+            el('div', { class: 'hint', text: (h.dir === 'out' ? 'To {name}' : 'From {name}') + ' · ' + UI.ago(h.at) + ' · ' + UI.bytes(h.size) + (h.sub ? ' · ' + h.sub : '') }),
           ]),
-          UI.button('Copy', () => api.copyHistory(i), 'small'),
+          UI.button('Preview', () => preview(h), 'small'),
+          (() => {
+            const b = UI.button('Copy', () => api.copyHistory(h.id), 'small');
+            b.disabled = !h.kept;
+            if (!h.kept) b.title = 'Too big to keep, so it cannot be copied again';
+            return b;
+          })(),
         ]))
         : [UI.row(c.historySize ? 'Nothing yet' : 'Recent items are off', '')]));
     };
