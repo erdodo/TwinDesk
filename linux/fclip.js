@@ -90,8 +90,8 @@ class FileClip {
     const inc = { id: m.id, items, files: Number(m.files) || 0, bytes: Number(m.bytes) || 0, at: Date.now() };
     this.incoming = inc;
     this.onChange();
-    if (!wants || typeof m.eager !== 'boolean') return;
-    if (m.eager && inc.bytes <= c.filesMaxMB * 1024 * 1024 && !missingTool()) return this._pull(inc);
+    if (!wants || (m.eager !== false && m.lazy !== true && m.eager !== true)) return;
+    if (m.eager === true && inc.bytes <= c.filesMaxMB * 1024 * 1024 && !missingTool()) return this._pull(inc);
     const mb = Math.max(1, Math.round(inc.bytes / 1048576));
     this.popup('home', mb + ' MB copied on ' + this.peerName() + ': use ' + this.cfg.pasteKeys.replace(/Control/g, 'Ctrl') + ' to paste');
   }
@@ -121,6 +121,14 @@ class FileClip {
       if (this.pulling && d.p === this.pulling.dir) return;
       if (i >= CACHE_KEEP || Date.now() - d.t > CACHE_MAX_AGE_MS) try { fs.rmSync(d.p, { recursive: true, force: true }); } catch (_) { /* in use */ }
     });
+  }
+
+  // A newer copy that is not files: what we offered is not the clipboard any more.
+  retract() {
+    if (!this.offer) return;
+    this.link.send({ t: T.FCLIP_GONE, id: this.offer.id });
+    this.offer = null;
+    this.onChange();
   }
 
   // Files in the cache are ones we received: never announced again.
