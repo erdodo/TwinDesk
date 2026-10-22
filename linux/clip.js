@@ -3,15 +3,17 @@
 // is what both paste (shared/clipsync.js): the clipboard is watched all the time and every copy gets
 // its time when it happens, even when nothing is sent; what goes out carries that time, and what
 // comes in is applied only when it is newer than the newest copy known here. Also: directions,
-// switch/instant mode, concealed filter, size limits, clip.policy both ways, and the in-memory Recent
-// list of texts (never on disk).
-const { clipboard } = require('electron');
+// switch/instant mode, concealed filter, size limits, clip.policy both ways, and the Recent list
+// (shared/clip-history.js): texts in memory, images and files kept in the app's cache folder.
+const path = require('path');
+const { app, clipboard, nativeImage } = require('electron');
+const { ClipHistory } = require('../shared/clip-history.js');
 const P = require('../shared/protocol.js');
 const sync = require('../shared/clipsync.js');
 const io = require('./clipio');
 
 const POLL_MS = 500; // how often the clipboard is checked for a new copy
-const PREVIEW = 300; // characters kept per history item for the UI
+const THUMB_W = 64; // width of the thumbnail of an image in the Recent list
 
 // Password managers mark secrets so clipboard tools leave them alone. clipboard.has() doesn't see
 // these registered formats; readBuffer() does (empty buffer = format absent).
@@ -36,7 +38,10 @@ class Clip {
     this.latest = new sync.Latest({ selfId: this.selfId, clock: new sync.Clock(opts.now) });
     this.fileClip = null; // fclip.js, set by main: files copied and received
     this.peerAccepts = true; // the other side's last clip.policy
-    this.history = []; // newest first: {dir: 'out'|'in', at, text, size}
+    this.history = new ClipHistory({ dir: opts.historyDir || path.join(app.getPath('userData'), 'cliphist'), max: this.cfg.historySize, maxBytes: 200 * 1048576 });
+    this.history.wipe(); // nothing from an earlier run stays on disk
+    this.thumbs = new Map(); // history id → data URL
+    this.fromHistory = null; // id of the Recent item being copied again; the next copy seen is that one
     this.lastSkip = '';
     this.seen = undefined; // key of the clipboard at the last check (undefined = not looked yet)
     this.item = null; // the copy on the clipboard now: {kind, stamp, p, concealed, sent}
@@ -78,7 +83,7 @@ class Clip {
   // Call after settings.clipboard changed.
   applySettings() {
     const c = this.cfg;
-    if (c.historySize < this.history.length) this.history.length = c.historySize;
+    this.history.setMax(c.historySize);
     this.sendPolicy();
     this.onChange();
   }
@@ -117,7 +122,8 @@ class Clip {
     if (first) return; // already there when TwinDesk started: not a new copy
     if (p.kind === 'files' && this.fileClip && this.fileClip.isCache(p.paths)) return; // files received from the other computer
     const id = p.kind === 'files' ? io.sha(Buffer.from(p.paths.join('\n'))) : p.kind === 'image' ? io.sha(p.png) : undefined;
-    const item = { kind: p.kind, stamp: this.latest.copied(p.kind, id), p, concealed: !!this.cfg.skipConcealed && isConcealed(), sent: false };
+    const item = { kind: p.kind, stamp: this.latest.copied(p.kind, id), p, concealed: !!this.cfg.skipConcealed && isConcealed(), sent: false, again: this.fromHistory };
+    this.fromHistory = null;
     this.item = item;
     if (p.kind !== 'files' && this.fileClip) this.fileClip.retract();
     if (this.cfg.mode === 'instant') await this._send(item);
@@ -136,12 +142,10 @@ class Clip {
     return c.enabled && c.receive && (kind === 'text' || (kind === 'image' ? c.images : c.files));
   }
 
-  _remember(dir, text) {
-    const n = this.cfg.historySize;
-    if (!n) return;
-    this.history = this.history.filter((h) => h.text !== text || h.dir !== dir);
-    this.history.unshift({ dir, at: Date.now(), text, size: Buffer.byteLength(text, 'utf8') });
-    if (this.history.length > n) this.history.length = n;
+  // Adds to the Recent list (nothing when it is off); a copy made by Copy again is already there.
+  _remember(dir, entry, again) {
+    if (again || !this.cfg.historySize) return;
+    try { this.history.add({ ...entry, dir }); } catch (_) { /* disk trouble: the list is a convenience */ }
   }
 
   async _onClip(m) {
@@ -152,7 +156,7 @@ class Clip {
       const stamp = this.latest.cur;
       if ((await io.readText()) !== m.text) io.writeText(m.text);
       await this._settle('text', stamp);
-      this._remember('in', m.text);
+      this._remember('in', { kind: 'text', text: m.text });
     }).catch(() => {});
   }
 
@@ -164,7 +168,10 @@ class Clip {
       await this._check();
       if (!this.latest.accept(m, 'image', img.id)) return;
       const stamp = this.latest.cur;
-      if (io.writeImage(img.png)) await this._settle('image', stamp);
+      if (io.writeImage(img.png)) {
+        await this._settle('image', stamp);
+        this._remember('in', { kind: 'image', png: img.png, w: img.w, h: img.h });
+      }
     }).catch(() => {});
   }
 
@@ -197,6 +204,7 @@ class Clip {
     if (it.kind === 'files') {
       it.sent = true;
       if (this.fileClip) this.fileClip.clipCopied(it.p.paths, it.stamp, (c.filesMaxMB || 0) * 1024 * 1024);
+      this._remember('out', { kind: 'files', files: it.p.paths.map((p) => ({ path: p })) }, it.again);
       return;
     }
     if (it.concealed) {
@@ -210,7 +218,10 @@ class Clip {
       it.sent = true;
       if (!msg) return this._skip('skipped an image of ' + Math.round(png.length / 1048576) + ' MB (over ' + P.CLIP_IMAGE_MAX_BYTES / 1048576 + ' MB)');
       if (!this.link.send(msg)) it.sent = false;
-      else this.lastSkip = '';
+      else {
+        this.lastSkip = '';
+        this._remember('out', { kind: 'image', png, w: size.width, h: size.height }, it.again);
+      }
       return this.onChange();
     }
     const text = it.p.text;
@@ -221,7 +232,7 @@ class Clip {
     }
     if (!this.link.send(sync.textMessage(text, it.stamp))) return;
     it.sent = true;
-    this._remember('out', text);
+    this._remember('out', { kind: 'text', text }, it.again);
     this.lastSkip = '';
     this.onChange();
   }
@@ -235,6 +246,7 @@ class Clip {
       if (!cur || cur.kind !== 'files' || cur.id !== id) return false; // a newer copy came meanwhile
       if (!(await io.writeFiles(paths))) return false;
       await this._settle('files', cur);
+      this._remember('in', { kind: 'files', files: paths.map((p) => ({ path: p })) });
       return true;
     }).catch(() => false);
   }
@@ -258,25 +270,64 @@ class Clip {
     this.onChange();
   }
 
-  // Put a Recent item back on the clipboard (it then goes out by the normal rules).
-  copyHistory(index) {
-    const h = this.history[index];
-    if (!h) return;
-    io.writeText(h.text);
-    this.force = true;
+  // Put a Recent item back on the clipboard as a new copy of now: it goes out by the normal rules and
+  // beats older copies. Resolves false when the item is gone or was not kept (names only).
+  copyHistory(id) {
+    return this._run(async () => {
+      const c = this.history.content(id);
+      if (!c) return false;
+      await this._check(); // whatever was copied before is stamped before this one
+      let ok = true;
+      if (c.kind === 'text') io.writeText(c.text);
+      else if (c.kind === 'image') ok = io.writeImage(c.png);
+      else ok = await io.writeFiles(c.paths);
+      if (!ok) return false;
+      this.fromHistory = id;
+      this.force = true;
+      await this._check(); // sees the new clipboard: stamps it now (the poll then finds nothing new)
+      if (this.cfg.mode === 'instant' && this.item && !this.item.sent) await this._send(this.item);
+      return true;
+    }).catch(() => false);
+  }
+
+  // Everything of a Recent item for the Preview window.
+  previewHistory(id) {
+    return this.history.preview(id);
   }
 
   clearHistory() {
-    this.history = [];
+    this.history.wipe();
+    this.thumbs.clear();
     this.onChange();
   }
 
+  // The app quits: the kept images and files go.
+  shutdown() {
+    clearInterval(this.poll);
+    this.history.wipe();
+  }
+
+  // Small picture for an image row, made once per item.
+  _thumb(id) {
+    if (this.thumbs.has(id)) return this.thumbs.get(id);
+    let url = '';
+    try {
+      const c = this.history.content(id);
+      if (c && c.png) url = nativeImage.createFromBuffer(c.png).resize({ width: THUMB_W }).toDataURL();
+    } catch (_) { /* no thumbnail */ }
+    this.thumbs.set(id, url);
+    return url;
+  }
+
   get view() {
+    const rows = this.history.list();
+    const ids = new Set(rows.map((r) => r.id));
+    for (const id of this.thumbs.keys()) if (!ids.has(id)) this.thumbs.delete(id);
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
       filesNote: this.cfg.files && this.cfg.enabled && this.cfg.receive ? io.missingTool() : '',
-      history: this.history.map((h) => ({ dir: h.dir, at: h.at, size: h.size, text: h.text.slice(0, PREVIEW) })),
+      history: rows.map((r) => (r.kind === 'image' && r.kept ? { ...r, thumb: this._thumb(r.id) } : r)),
     };
   }
 }
