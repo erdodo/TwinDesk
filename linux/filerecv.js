@@ -213,7 +213,7 @@ class FileRecv {
     const name = b.placed.length === 1 ? path.basename(b.placed[0]) : b.placed.length + ' items';
     this.last = { name, ok: b.ok > 0, text: b.ok === b.count ? 'Saved to ' + b.dir : (b.count - b.ok) + ' of ' + b.count + ' failed', at: Date.now() };
     if (b.ok && b.reveal) fm.showItems(b.placed);
-    if (this.onBatch) this.onBatch({ kind: b.kind, files: b.ok, count: b.count, ok: b.ok === b.count });
+    if (this.onBatch) this.onBatch({ kind: b.kind, files: b.ok, count: b.count, ok: b.ok === b.count, batch, placed: b.placed.slice() });
     this.onChange();
   }
 

@@ -80,6 +80,9 @@ function normalize(s) {
       skipConcealed: bool(c.skipConcealed, true),
       maxKB: Math.round(num(c.maxKB, 256, 1, P.CLIP_MAX_BYTES / 1024)),
       historySize: Math.round(num(c.historySize, 20, 0, 100)),
+      images: bool(c.images, true), // images on the clipboard are shared too (PNG, up to P.CLIP_IMAGE_MAX_BYTES)
+      files: bool(c.files, true), // files copied normally (Ctrl+C in a file manager) are shared when small enough
+      filesMaxMB: Math.round(num(c.filesMaxMB, 50, 1, 2048)), // total size of such a copy; bigger ones wait for the paste shortcut
     },
     monitor: {
       volume: Math.round(num(mon.volume, 1, 0, 1) * 100) / 100,
