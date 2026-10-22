@@ -17,6 +17,7 @@ UI.tab({
 
     const peerRow = UI.row('', '');
     const skipNote = UI.note('info', '');
+    const pausedNote = UI.note('warn', '');
     const mode = UI.segmented([
       { value: 'instant', label: 'Instantly' }, // the default
       { value: 'switch', label: 'When you switch' },
@@ -58,6 +59,7 @@ UI.tab({
         UI.row('Recent items', 'Text stays in memory; images and files are kept in the app’s cache folder until you clear them or quit', [historySize]),
       ]),
       skipNote,
+      pausedNote,
       UI.card('Recent', [list], { actions: [clearBtn] }),
     );
 
@@ -116,6 +118,7 @@ UI.tab({
       peerRow.label.textContent = 'Turned off on ' + UI.peer(s).name;
       peerRow.setHint('');
       skipNote.set(c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
+      pausedNote.set(c.enabled && c.paused && c.pausedUntil > Date.now() ? 'Clipboard sync paused for 30 s: copies were coming in too fast (a loop?)' : '');
       clearBtn.disabled = !c.history.length;
 
       const key = JSON.stringify(c.history.map((h) => [h.id, h.dir, h.kept])) + c.historySize + Math.floor(Date.now() / 15000);

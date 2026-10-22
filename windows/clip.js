@@ -17,6 +17,7 @@ const P = require('../shared/protocol.js');
 const S = require('../shared/clipsync.js');
 const { Pool } = require('../shared/mesh.js');
 const { ClipHistory } = require('../shared/clip-history.js');
+const G = require('../shared/clipguard.js');
 
 const electronClipboard = electron.clipboard; // undefined under plain node (tests inject one)
 const electronImage = electron.nativeImage;
@@ -44,6 +45,27 @@ function isConcealed(clipboard) {
     if (b && b.length >= 4 && b.readUInt32LE(0) === 0) return true;
   } catch (_) { /* unknown format: not concealed */ }
   return false;
+}
+
+// An image by its size and a sample of its pixels (never its PNG bytes: encoders differ).
+function imageKeyOf(im) {
+  const sz = im.getSize();
+  const bm = im.toBitmap();
+  const step = Math.max(1, Math.floor(bm.length / 65536));
+  const sample = Buffer.alloc(Math.ceil(bm.length / step));
+  for (let i = 0, j = 0; i < bm.length; i += step) sample[j++] = bm[i];
+  return G.imageKey(sz.width, sz.height, md5(sample));
+}
+
+// Files by names and sizes (the same on every device); folders count by name.
+function filesInfo(paths) {
+  const list = [];
+  for (const p of paths) {
+    let size = 0;
+    try { const st = fs.statSync(p); size = st.isFile() ? st.size : 0; } catch (_) { /* gone */ }
+    list.push({ name: path.basename(p), size });
+  }
+  return { paths, key: paths.length ? G.filesKey(list) : '' };
 }
 
 // A cheap fingerprint of the file-copy formats ('' = none).
@@ -105,8 +127,12 @@ class Clip {
     this.hist = new ClipHistory({ dir: '', max: 0 }); // the Recent list; dir is set by attachFiles
     this.thumbs = new Map(); // history id -> thumbnail data URL
     this.lastSkip = '';
+    this.echo = new G.EchoGuard(); // what we wrote or sent a moment ago: its echo is not a new copy
+    this.breaker = new G.Breaker(); // copies faster than a person can make them pause the sync
+    this.trips = 0; // breaker trips already logged
+    this.fileInfo = null; // the file list as last resolved: {raw, paths, key}
     this.poll = null;
-    this.sig = null; // fingerprint of the clipboard as last seen (null = not looked at yet)
+    this.sig = null; // content key of the clipboard as last seen (null = not looked at yet)
     this.item = null; // what the clipboard holds: {kind, id, stamp, text|image|paths, sent, received, concealed}
     this.busy = null; // the poll in progress (a promise)
     this.applying = false; // writing an item from another device: not a copy made here
@@ -274,58 +300,72 @@ class Clip {
     return this.tick();
   }
 
+  // What the clipboard holds, decided by CONTENT only (the format list just tells the kind): the OS
+  // adding formats, converting an image or rewriting line breaks or the file list is not a change.
   async _signature() {
     let formats = [];
     try { formats = this.clipboard.availableFormats(); } catch (_) { /* none */ }
     const text = await this._readText();
-    const files = fileKey(this.clipboard);
-    const fk = formats.join();
+    const raw = fileKey(this.clipboard);
+    const finfo = raw ? await this._files(raw) : null;
+    const files = !!(finfo && finfo.key);
     const isImage = !text && !files && formats.some((f) => f.startsWith('image/'));
     if (!isImage) this.img = null; // the next image is looked at fresh (not the one from before a text copy)
-    const image = isImage ? this._imageKey(fk) : '';
-    return { sig: [fk, files, text ? md5(text) : '', image].join('|'), text, files: !!files, image: !!image };
+    const image = isImage ? this._imageKey(formats.join()) : '';
+    const key = files ? finfo.key : text ? G.textKey(text) : image;
+    return { sig: key, key, text, files, image: !!image, finfo };
   }
 
-  // size + a sample of the pixels; the image is read at most every IMAGE_POLL_MS while nothing else changed.
+  // The files on the clipboard (names and sizes), asked of the helper only when the file formats changed.
+  async _files(raw) {
+    if (this.fileInfo && this.fileInfo.raw === raw) return this.fileInfo;
+    let paths = [];
+    if (this.helper) try { paths = await this.helper.clipFiles(); } catch (_) { /* no helper */ }
+    paths = paths.filter((p) => typeof p === 'string' && fs.existsSync(p));
+    this.fileInfo = { raw, ...filesInfo(paths) };
+    return this.fileInfo;
+  }
+
+  // The pixel key of the image on the clipboard; read at most every IMAGE_POLL_MS while nothing else changed.
   _imageKey(fk) {
     const now = Date.now();
     if (this.img && this.img.fk === fk && now - this.img.at < IMAGE_POLL_MS) return this.img.key;
-    let key = '';
-    let image = null;
+    const r = this._readImage();
+    this.img = { fk, at: now, ...r };
+    return r.key;
+  }
+
+  _readImage() {
     try {
       const im = this.clipboard.readImage();
-      if (im && !im.isEmpty()) {
-        const sz = im.getSize();
-        const bm = im.toBitmap();
-        const step = Math.max(1, Math.floor(bm.length / 65536));
-        const sample = Buffer.alloc(Math.ceil(bm.length / step));
-        for (let i = 0, j = 0; i < bm.length; i += step) sample[j++] = bm[i];
-        key = sz.width + 'x' + sz.height + ':' + bm.length + ':' + md5(sample);
-        image = im;
-      }
+      if (im && !im.isEmpty()) return { key: imageKeyOf(im), image: im };
     } catch (_) { /* unreadable: no image */ }
-    this.img = { fk, at: now, key, image };
-    return key;
+    return { key: '', image: null };
   }
 
   async _changed(s) {
+    if (!s.key || this.echo.isEcho(s.key)) return; // emptied, or the echo of our own write: not a copy
     let item = null;
-    if (s.files) item = await this._filesItem();
+    if (s.files) item = { kind: 'files', id: crypto.randomUUID(), paths: s.finfo.paths };
     if (!item && s.text) item = { kind: 'text', id: md5(s.text).slice(0, 16), text: s.text, concealed: isConcealed(this.clipboard) };
     if (!item && s.image && this.img && this.img.image) item = { kind: 'image', id: this.img.key, image: this.img.image, concealed: isConcealed(this.clipboard) };
-    if (!item) return; // emptied, or something that is not shared
+    if (!item) return; // something that is not shared
+    if (!this.breaker.hit()) return this._tripped(); // copies faster than a person: a loop?
+    item.key = s.key;
     item.stamp = this.latest.copied(item.kind, item.id);
     item.sent = false;
+    this.echo.note(item.key);
     this.item = item;
     if (this.cfg.mode === 'instant') await this._sendPending();
   }
 
-  async _filesItem() {
-    if (!this.helper) return null;
-    let paths = [];
-    try { paths = await this.helper.clipFiles(); } catch (_) { /* no helper */ }
-    paths = paths.filter((p) => typeof p === 'string' && fs.existsSync(p));
-    return paths.length ? { kind: 'files', id: crypto.randomUUID(), paths } : null;
+  // The breaker stopped the sync for a while (logged once per trip, shown on the page).
+  _tripped() {
+    if (this.trips !== this.breaker.trips) {
+      this.trips = this.breaker.trips;
+      console.warn('clipboard sync paused for 30 s: copies were coming in too fast (a loop?)');
+    }
+    this.onChange();
   }
 
   // Add to the Recent list (nothing at all when it is off); from: the name of the device it came from.
@@ -447,11 +487,15 @@ class Clip {
 
   // Write something to the clipboard without it counting as a copy made here: the fingerprint
   // is taken again right after, so the poll sees nothing new.
-  async _apply(write) {
+  async _apply(write, key) {
     this.applying = true;
     try {
       await write();
-      this.sig = (await this._signature()).sig;
+      this.img = null; // look at the image again, not at the cached look
+      const s = await this._signature();
+      this.sig = s.sig;
+      this.echo.note(key); // what we wrote, and what the clipboard shows of it
+      this.echo.note(s.key);
     } finally {
       this.applying = false;
     }
@@ -473,9 +517,10 @@ class Clip {
     const r = this.pool.receive(from, m);
     if (!r.fresh) return;
     if (!(await this._accept(r.msg, 'text', md5(m.text).slice(0, 16)))) return;
+    const key = G.textKey(m.text);
     await this._apply(async () => {
-      if ((await this._readText()) !== m.text) this.clipboard.writeText(m.text);
-    });
+      if (G.textKey(await this._readText()) !== key) this.clipboard.writeText(m.text); // the same content is left alone
+    }, key);
     this._remember({ kind: 'text', dir: 'in', text: m.text }, this._nameOf(r.msg.o, m.on, from));
     this.onChange();
   }
@@ -490,7 +535,10 @@ class Clip {
     const r = this.pool.receive(from, m); // relayed as it came: one image per hop, not re-encoded
     if (!r.fresh) return;
     if (!(await this._accept(r.msg, 'image', img.id))) return;
-    await this._apply(() => this.clipboard.writeImage(im));
+    const key = imageKeyOf(im);
+    await this._apply(() => {
+      if (this._readImage().key !== key) this.clipboard.writeImage(im);
+    }, key);
     this._remember({ kind: 'image', dir: 'in', png: img.png, w: img.w, h: img.h }, this._nameOf(r.msg.o, null, from));
     this.onChange();
   }
@@ -537,7 +585,10 @@ class Clip {
     const cur = this.latest.cur;
     if (mine && b.ok && Array.isArray(b.placed) && b.placed.length && cur && cur.id === b.batch) {
       this.item = { kind: 'files', id: b.batch, stamp: { ts: cur.ts, o: cur.o }, sent: true, received: true };
-      this._later(() => this._apply(() => this.helper.setFileDrop(b.placed)).then(() => {
+      const key = filesInfo(b.placed).key;
+      this._later(() => this._apply(async () => {
+        if ((await this._signature()).key !== key) await this.helper.setFileDrop(b.placed);
+      }, key).then(() => {
         this._remember({ kind: 'files', dir: 'in', files: b.placed.map((p) => ({ path: p })) }, this._nameOf(cur.o, null, cur.o));
         this.onChange();
       }));
@@ -552,14 +603,16 @@ class Clip {
       const c = this.hist.content(id);
       if (!c) return false;
       if (this.busy) await this.busy.catch(() => {}); // a copy being noticed is stamped first
+      if (!this.breaker.hit()) { this._tripped(); return false; }
+      const im = c.kind === 'image' ? this.nativeImage.createFromBuffer(c.png) : null;
+      const item = c.kind === 'text' ? { kind: 'text', id: md5(c.text).slice(0, 16), text: c.text, concealed: false, key: G.textKey(c.text) }
+        : c.kind === 'image' ? { kind: 'image', id: md5(c.png).slice(0, 16), image: im, concealed: false, key: imageKeyOf(im) }
+          : { kind: 'files', id: crypto.randomUUID(), paths: c.paths, again: true, key: filesInfo(c.paths).key };
       await this._apply(async () => {
         if (c.kind === 'text') this.clipboard.writeText(c.text);
-        else if (c.kind === 'image') this.clipboard.writeImage(this.nativeImage.createFromBuffer(c.png));
+        else if (c.kind === 'image') this.clipboard.writeImage(im);
         else await this.helper.setFileDrop(c.paths);
-      });
-      const item = c.kind === 'text' ? { kind: 'text', id: md5(c.text).slice(0, 16), text: c.text, concealed: false }
-        : c.kind === 'image' ? { kind: 'image', id: md5(c.png).slice(0, 16), image: this.nativeImage.createFromBuffer(c.png), concealed: false }
-          : { kind: 'files', id: crypto.randomUUID(), paths: c.paths, again: true };
+      }, item.key);
       item.stamp = this.latest.copied(item.kind, item.id);
       item.sent = false;
       this.item = item;
@@ -597,6 +650,8 @@ class Clip {
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
+      paused: this.breaker.paused,
+      pausedUntil: this.breaker.paused ? this.breaker.until : 0,
       history: rows.map((r) => {
         const from = (this.hist.get(r.id) || {}).from || '';
         return r.kind === 'image' && r.kept ? { ...r, from, thumb: this._thumb(r.id) } : { ...r, from };

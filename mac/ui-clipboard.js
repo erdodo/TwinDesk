@@ -17,6 +17,7 @@ UI.tab({
 
     const peerNote = UI.note('warn', '');
     const skipNote = UI.note('info', '');
+    const pausedNote = UI.note('warn', '');
     const send = UI.switch((v) => set({ send: v }), { label: 'Send' });
     const receive = UI.switch((v) => set({ receive: v }), { label: 'Receive' });
     const mode = UI.segmented([
@@ -102,6 +103,7 @@ UI.tab({
         UI.row('Recent items', 'Text stays in memory. Images and files are kept in the app’s cache folder until you clear them or quit', [historySize]),
       ]),
       skipNote,
+      pausedNote,
       UI.card('Recent', [list], { actions: [clearBtn] }),
     );
 
@@ -121,6 +123,7 @@ UI.tab({
       historySize.set(c.historySize);
       peerNote.set(s.client && !c.peerAccepts ? `Turned off on ${s.client.name}.` : '');
       skipNote.set(c.enabled && c.lastSkip ? `Last copy not sent: ${c.lastSkip}.` : '');
+      pausedNote.set(c.enabled && c.paused ? 'Clipboard sync paused for 30 s: copies were coming in too fast (a loop?).' : '');
       clearBtn.disabled = !c.history.length;
 
       // Rebuild the list only when it changed (or every 15 s for the relative times).

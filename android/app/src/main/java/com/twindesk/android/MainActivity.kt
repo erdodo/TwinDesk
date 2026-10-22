@@ -1022,6 +1022,7 @@ private fun ClipboardPage(core: Core, v: Int) {
         DirHead(name, false, me, true)
         SwitchRow("Copies on $name land here", "At once", core.sync.get("clipboard", "in"), first = true) { core.sync.set("clipboard", "in", it) }
     }
+    if (core.clip.paused) Note("Clipboard sync paused for 30 s: copies were coming in too fast (a loop?)", "warn")
     MacCard {
         DirHead(me, true, name, false)
         SwitchRow("Copies here go to $name", "While TwinDesk is open, or always with wireless debugging", core.sync.get("clipboard", "out"), first = true) { core.sync.set("clipboard", "out", it) }

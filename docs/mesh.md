@@ -136,6 +136,7 @@ gets an item, the time decides which item wins.
   granted the background read, or when "Display over other apps" is allowed (`ClipFocus.kt` takes
   the input focus for a moment through a 1 px overlay window); otherwise when the app comes to the
   front. The Clipboard tab shows which of these is in effect.
+- **Clipboard loop guards** (`shared/clipguard.js`, `ClipGuard.kt`): a change is compared by its CONTENT only (text with line breaks normalised, images by size and a pixel sample, files by names and sizes), never by the format list. What a device writes or sends is remembered for 8 s (`EchoGuard`), so its echo is not a copy; an incoming item equal to the clipboard content is not written again. `Breaker` pauses stamping and sending for 30 s after more than 8 copies in 10 s, and the page says so (`paused`, `pausedUntil`).
 - **Switches are per device and unchanged:** `clip.policy` (`accept`, and now `images` and `files`)
   per peer, the hop limit, and the notification pool, which has no time and is not touched.
 

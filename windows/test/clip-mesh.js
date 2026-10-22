@@ -53,7 +53,7 @@ function winBoard() {
     text: '', image: null, files: null, buffers: {}, writes: [], imageWrites: [],
     availableFormats: () => (b.image ? ['image/png'] : b.text ? ['text/plain'] : []),
     readText: () => b.text,
-    writeText(t) { b.text = t; b.image = null; b.files = null; b.buffers = {}; b.writes.push(t); },
+    writeText(t) { b.text = b.rewrite ? b.rewrite(t) : t; b.image = null; b.files = null; b.buffers = {}; b.writes.push(t); }, // rewrite: what the OS keeps (line breaks)
     readBuffer: (f) => b.buffers[f] || Buffer.alloc(0),
     readImage: () => fakeImage(b.image),
     writeImage(im) { b.image = im.toPNG(); b.text = ''; b.imageWrites.push(b.image); },
@@ -82,7 +82,7 @@ async function macDevice(net, id, cfg) {
   dev.os = 'mac';
   const b = { text: '', png: null, writes: [], imageWrites: [] };
   b.readText = async () => b.text;
-  b.writeText = (t) => { b.text = t; b.png = null; b.writes.push(t); };
+  b.writeText = (t) => { b.text = b.rewrite ? b.rewrite(t) : t; b.png = null; b.writes.push(t); }; // rewrite: what the OS keeps (line breaks)
   b.readImage = () => fakeImage(b.png);
   b.writeImage = (im) => { b.png = im.toPNG(); b.text = ''; b.imageWrites.push(b.png); };
   dev.board = b;
@@ -335,6 +335,28 @@ scenario('files: the offer goes to every device that takes files; the selected o
   await net.run();
   assert.strictEqual(net.sent('fclip.paste').length, before, 'an older offer is not fetched');
   assert.strictEqual(P.board.text, 'newer than the files');
+});
+
+// The loop test: three devices whose systems rewrite the clipboard after every write (a Windows PC
+// keeps CRLF line breaks, the Mac LF). A copy on W must settle: a bounded number of pool messages,
+// and each device other than W applies it exactly once.
+scenario('a copy with line breaks rewritten by each system settles: bounded messages, applied once each', async () => {
+  const { net, W, M, P } = await world('full');
+  W.board.rewrite = (t) => t.replace(/\r?\n/g, '\r\n');
+  M.board.rewrite = (t) => t.replace(/\r\n/g, '\n');
+  P.board.rewrite = (t) => t.replace(/\r?\n/g, '\r\n');
+  net.log.length = 0;
+  await W.copyText('line one\nline two');
+  await net.run();
+  await later();
+  await net.run();
+  const msgs = net.sent('clip').length + net.sent('clip.image').length;
+  assert.ok(msgs <= 6, 'a bounded number of messages, got ' + msgs);
+  assert.strictEqual(M.board.writes.length, 1, 'M applied it once');
+  assert.strictEqual(P.board.writes.length, 1, 'P applied it once');
+  assert.strictEqual(W.board.writes.length, 0, 'W never wrote its own copy');
+  assert.strictEqual(M.board.text, 'line one\nline two');
+  assert.strictEqual(P.board.text, 'line one\r\nline two');
 });
 
 async function main() {

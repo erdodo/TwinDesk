@@ -396,5 +396,194 @@ async function test(name, fn) {
     assert.ok(!fs.existsSync(w.clip.historyDir));
   });
 
+
+  // ---- loop guard: two devices, an OS that touches the clipboard after every write ----
+  const G = require('../../shared/clipguard.js');
+  const clipPath = require.resolve('../clip.js');
+
+  // A fake OS clipboard. touch() is "the OS (or another app) rewrote the clipboard after our write"
+  // and toggles every time: line breaks, re-encoded PNG + another format, a rewritten file list, a
+  // format that appears late. Contents stay the same, only their dress changes.
+  function mkOS(kind) {
+    const st = { text: '', bm: null, png: null, buffers: {}, files: null, dirty: false, writes: 0, flip: false, extra: false, reads: 0 };
+    const img = () => ({ isEmpty: () => !st.bm, getSize: () => ({ width: 4, height: 2 }), toBitmap: () => st.bm, toPNG: () => st.png, resize: () => ({ toDataURL: () => 'data:image/png;base64,t' }) });
+    const fromBuf = (b) => ({ isEmpty: () => !b || !b.length, getSize: () => ({ width: 4, height: 2 }), toBitmap: () => b, toPNG: () => b, resize: () => ({ toDataURL: () => 'data:image/png;base64,t' }) });
+    const clipboard = {
+      availableFormats: () => [...(st.text ? ['text/plain'] : []), ...(st.extra ? ['text/html'] : []), ...(st.bm ? ['image/png'] : []), ...(st.bm && st.extra ? ['image/bmp'] : [])],
+      readText: () => st.text,
+      writeText: (t) => { st.text = t; st.bm = null; st.buffers = {}; st.files = null; st.writes++; st.dirty = true; },
+      readBuffer: (f) => st.buffers[f] || Buffer.alloc(0),
+      readImage: () => { st.reads++; return img(); },
+      writeImage: (im) => { st.bm = im.toBitmap(); st.png = im.toPNG(); st.text = ''; st.buffers = {}; st.files = null; st.writes++; st.dirty = true; },
+    };
+    const osx = {
+      st,
+      electron: { clipboard, nativeImage: { createFromBuffer: fromBuf }, app: electron.app },
+      setFiles(paths) { st.files = paths; st.buffers = { FileNameW: Buffer.from(paths.join('|')) }; st.text = ''; st.bm = null; },
+      touch() {
+        if (!st.dirty) return;
+        st.dirty = false;
+        st.flip = !st.flip;
+        if (kind === 'text') st.text = st.flip ? st.text.replace(/\n/g, '\r\n') : st.text.replace(/\r\n/g, '\n');
+        if (kind === 'late') st.extra = !st.extra;
+        if (kind === 'image') { st.png = Buffer.concat([st.png, Buffer.from([st.flip ? 1 : 2])]); st.extra = !st.extra; }
+        if (kind === 'files' && st.files) {
+          const d = fs.mkdtempSync(path.join(osx.dir, 'rw-'));
+          st.files = st.files.map((f) => { const to = path.join(d, path.basename(f)); fs.copyFileSync(f, to); return to; });
+          st.buffers = { FileNameW: Buffer.from(st.files.join('|')), ...(st.flip ? { 'Shell IDList Array': Buffer.from([1]) } : {}) };
+        }
+      },
+      dir: fs.mkdtempSync(path.join(os.tmpdir(), 'clip-os-')),
+    };
+    return osx;
+  }
+
+  // One Windows clip.js bound to its own fake OS (the module is loaded again so it captures it).
+  function device(id, kind, cfg, peer) {
+    const o = mkOS(kind);
+    cached.exports = o.electron;
+    delete require.cache[clipPath];
+    const C = require('../clip.js');
+    cached.exports = electron;
+    const handlers = {};
+    const sent = [];
+    const otherId = id === 'A' ? 'B' : 'A';
+    const send = (m) => { sent.push(m); const to = peer.d; setImmediate(() => to && to.handlers[m.t] && to.handlers[m.t](m)); return true; };
+    // The other device is one old one-to-one peer of the mesh (no pool stamps, only the time of copies).
+    const mesh = new Mesh({ selfId: id });
+    mesh.addPeer({ id: otherId, name: otherId, os: 'win', mesh: false, send });
+    const bus = {
+      on: (t, f) => { const list = (bus.l[t] = bus.l[t] || []); list.push(f); handlers[t] = (m) => list.forEach((x) => x(m, otherId)); },
+      l: {},
+      onPeer: () => {},
+      send: (to, m) => send(m),
+      selectedId: () => otherId,
+      connectedIds: () => [otherId],
+    };
+    const link = { send };
+    const d = { id, os: o, sent, handlers, link, calls: { drop: 0, announce: 0 } };
+    const clip = new C({ bus, mesh, getSettings: () => cfg, onChange: () => {} });
+    clip.latest = new S.Latest({ selfId: id, clock: clock() });
+    clip.echo = new G.EchoGuard({ now: () => now });
+    clip.breaker = new G.Breaker({ now: () => now });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-dev-'));
+    clip.attachFiles({
+      helper: { clipFiles: async () => o.st.files || [], setFileDrop: async (paths) => { d.calls.drop++; o.setFiles(paths); o.st.writes++; o.st.dirty = true; } },
+      fileClip: {
+        fileRecv: { expectBatch: (bid, dir) => { d.expect = { bid, dir }; } },
+        announce: (paths, stamp, fid, mb) => {
+          d.calls.announce++;
+          d.offer = paths;
+          link.send({ t: 'fclip.offer', id: fid, bytes: 1, eager: true, ...stamp });
+          return { bytes: 1 };
+        },
+        notice: () => {},
+      },
+      cacheDir: path.join(root, 'cache'),
+      historyDir: path.join(root, 'hist'),
+    });
+    d.clip = clip;
+    handlers['fclip.offer'] = (m) => { if (clip.latest.accept(m, 'files', m.id)) clip.fileOffered({ id: m.id, bytes: m.bytes }, m); };
+    handlers['fclip.paste'] = (m) => { // the other side asks for our offer: its files land in its folder
+      const them = peer.d;
+      const placed = d.offer.map((p) => { const to = path.join(them.expect.dir, path.basename(p)); fs.copyFileSync(p, to); return to; });
+      them.clip.filesArrived({ quiet: true, batch: m.id, ok: true, placed });
+    };
+    return d;
+  }
+
+  async function pair(kind, cfgOver) {
+    const a = {}; const b = {};
+    const A = device('A', kind, settings(cfgOver), b);
+    const B = device('B', kind, settings(cfgOver), a);
+    a.d = A; b.d = B;
+    await A.clip.tick(); await B.clip.tick(); // what is on the clipboards at start stays unstamped
+    return { A, B };
+  }
+
+  const dataMsgs = (...ds) => ds.reduce((n, d) => n + d.sent.filter((m) => ['clip', 'clip.image', 'fclip.offer'].includes(m.t)).length, 0);
+
+  async function rounds(A, B, n = 8) {
+    for (let i = 0; i < n; i++) {
+      now += 1000;
+      A.os.touch(); B.os.touch();
+      await A.clip.tick(); await B.clip.tick();
+      for (let k = 0; k < 4; k++) await wait();
+      await A.clip.queue; await B.clip.queue;
+    }
+  }
+
+  await test('loop guard: text rewritten by the OS after each write settles (CRLF toggling)', async () => {
+    const { A, B } = await pair('text');
+    A.os.st.text = 'line 1\nline 2'; now += 1000;
+    await rounds(A, B);
+    assert.strictEqual(G.textKey(B.os.st.text), G.textKey('line 1\nline 2'));
+    assert.ok(dataMsgs(A, B) <= 4, 'messages: ' + dataMsgs(A, B));
+    assert.strictEqual(B.os.st.writes, 1);
+    assert.strictEqual(A.os.st.writes, 0);
+  });
+
+  await test('loop guard: a format that appears a moment after the write is no new copy', async () => {
+    const { A, B } = await pair('late');
+    A.os.st.text = 'hello'; now += 1000;
+    await rounds(A, B);
+    assert.strictEqual(B.os.st.text, 'hello');
+    assert.strictEqual(dataMsgs(A, B), 1, 'messages: ' + dataMsgs(A, B)); // B does not send it back
+    assert.strictEqual(B.os.st.writes, 1);
+  });
+
+  await test('loop guard: an image re-encoded by the OS with another format list settles', async () => {
+    const { A, B } = await pair('image');
+    A.os.st.bm = png(6); A.os.st.png = png(6); now += 1000;
+    await rounds(A, B);
+    assert.ok(B.os.st.bm.equals(png(6)));
+    assert.ok(dataMsgs(A, B) <= 4, 'messages: ' + dataMsgs(A, B));
+    assert.strictEqual(B.os.st.writes, 1);
+    assert.strictEqual(A.os.st.writes, 0);
+  });
+
+  await test('loop guard: a file list rewritten with the same names settles', async () => {
+    const { A, B } = await pair('files');
+    const f = path.join(A.os.dir, 'report.txt');
+    fs.writeFileSync(f, 'contents');
+    A.os.setFiles([f]); now += 1000;
+    await rounds(A, B);
+    assert.strictEqual(B.calls.drop, 1);
+    assert.deepStrictEqual(B.os.st.files.map((p) => path.basename(p)), ['report.txt']);
+    assert.ok(dataMsgs(A, B) <= 4, 'messages: ' + dataMsgs(A, B));
+    assert.strictEqual(A.calls.drop, 0);
+  });
+
+  await test('an incoming item equal to the clipboard is not written again, but its stamp and history count', async () => {
+    const { A } = await pair('text');
+    A.os.st.text = 'a\r\nb'; now += 1000;
+    await A.clip.tick();
+    const writes = A.os.st.writes;
+    A.clip.hist.max = 20;
+    A.handlers.clip({ t: 'clip', text: 'a\nb', ts: now + 5000, o: 'B' });
+    await settle(A.clip);
+    assert.strictEqual(A.os.st.writes, writes);
+    assert.strictEqual(A.clip.latest.cur.ts, now + 5000);
+    assert.ok(A.clip.view.history.some((r) => r.dir === 'in' && r.kind === 'text'));
+  });
+
+  await test('breaker: a runaway detector pauses the sync, a person copying every few seconds never does', async () => {
+    const { A } = await pair('text');
+    for (let i = 0; i < 14; i++) { A.os.st.text = 'run ' + i; now += 100; await A.clip.tick(); }
+    const sentNow = A.sent.filter((m) => m.t === 'clip').length;
+    assert.strictEqual(sentNow, 8);
+    assert.strictEqual(A.clip.view.paused, true);
+    assert.ok(A.clip.view.pausedUntil > now);
+    now += 31000;
+    assert.strictEqual(A.clip.view.paused, false);
+    A.os.st.text = 'after the pause'; now += 1000;
+    await A.clip.tick();
+    assert.strictEqual(A.sent.filter((m) => m.t === 'clip').length, 9);
+    const B2 = await pair('text');
+    for (let i = 0; i < 60; i++) { B2.A.os.st.text = 'person ' + i; now += 3000; await B2.A.clip.tick(); }
+    assert.strictEqual(B2.A.sent.filter((m) => m.t === 'clip').length, 60);
+    assert.strictEqual(B2.A.clip.view.paused, false);
+  });
+
   console.log(n + ' passed' + (process.exitCode ? ', some FAILED' : ''));
 })();
