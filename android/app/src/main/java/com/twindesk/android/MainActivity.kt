@@ -114,7 +114,8 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // In front: Android lets us read the clipboard now.
-        if (hasFocus) Core.get(this).let { if (it.sync.get("clipboard", "out")) it.clip.sendCurrent(false) }
+        // (a copy made while we were behind is stamped when it happened and goes now)
+        if (hasFocus) Core.get(this).clip.sendCurrent(false)
     }
 
     companion object {
@@ -1026,8 +1027,20 @@ private fun ClipboardPage(core: Core, v: Int) {
         SwitchRow("Copies here go to $name", "While TwinDesk is open, or always with wireless debugging", core.sync.get("clipboard", "out"), first = true) { core.sync.set("clipboard", "out", it) }
         if (core.host != null) MacRow("Send the clipboard now", "Also: the Send clipboard tile in Quick Settings") { Secondary("Send") { core.clip.sendCurrent(true) } }
     }
-    if (core.clip.history.isNotEmpty()) MacCard("Recent") {
-        core.clip.history.toList().take(12).forEachIndexed { i, (dir, text) ->
+    MacCard("Images and files") {
+        SwitchRow("Images", "Pictures copied on one are pasted on the other", core.store.flag("clipboard.images", true), first = true) { core.store.setFlag("clipboard.images", it); core.changed() }
+        SwitchRow("Files", "Files copied in the Files app or a file manager go with the clipboard", core.store.flag("clipboard.files", true)) { core.store.setFlag("clipboard.files", it); core.changed() }
+        val sizes = listOf(10, 25, 50, 100, 250, 500)
+        val at = sizes.indexOf(core.store.int("clipboard.filesMaxMB", 50)).let { if (it < 0) 2 else it }
+        MacRow("Largest files that go at once", "Bigger ones wait until you paste them on $name with ⌃⌥V") {
+            MacSlider(at.toFloat(), 0f..5f, 4, { "${sizes[Math.round(it).coerceIn(0, 5)]} MB" }) { v ->
+                core.store.setInt("clipboard.filesMaxMB", sizes[Math.round(v).coerceIn(0, 5)])
+                core.changed()
+            }
+        }
+    }
+    if (core.clip.recent().isNotEmpty()) MacCard("Recent") {
+        core.clip.recent().take(12).forEachIndexed { i, (dir, text) ->
             MacRow(text.replace('\n', ' ').take(120), if (dir == "in") "From $name · tap to copy" else "To $name · tap to copy", first = i == 0, onClick = {
                 ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("TwinDesk", text))
             })

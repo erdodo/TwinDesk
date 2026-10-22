@@ -144,6 +144,10 @@ func handle(_ line: String) {
     reply(id)
   case "clipboardInfo":
     reply(id, PasteboardWatch.info())
+  case "clipboardFiles":
+    // A file list for the clipboard (files received from the other computer).
+    if let n = PasteboardWatch.writeFiles((msg["paths"] as? [String]) ?? []) { reply(id, ["changeCount": n]) }
+    else { replyError(id, "could not put the files on the clipboard") }
   case "audioCapture":
     AudioCapture.shared.set(on: (msg["on"] as? Bool) ?? false) { err in
       if let err = err { replyError(id, err) } else { reply(id) }

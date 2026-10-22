@@ -13,9 +13,12 @@ const fs = require('fs');
 const P = require('../shared/protocol.js');
 
 const T = P.T;
+const MB = 1024 * 1024;
 
 class FileClip {
-  // opts: link, helper, fileDrop, fileRecv, dragRecv, settings (shared), peerName(), popup(kind, text), onChange()
+  // opts: link, helper, fileDrop, fileRecv, dragRecv, settings (shared), peerName(), popup(kind, text), onChange(),
+  // clip (clip.js: the time of every copy, and the eager copy of small file sets), bus (hub.bus: a
+  // file copy from the clipboard is announced to every connected device that takes files)
   constructor(opts) {
     Object.assign(this, opts);
     this.offer = null; // ours: {id, paths, items, files, bytes}
@@ -28,10 +31,12 @@ class FileClip {
     const link = this.link;
     link.on(T.FCLIP_OFFER, (m) => {
       if (typeof m.id !== 'string' || !Array.isArray(m.items)) return;
+      if (this.clip && !this.clip.acceptOffer(m, this.bus ? this.bus.selectedId() : '')) return; // an older copy than ours
       const items = m.items.slice(0, 1000).map((i) => ({ name: String((i && i.name) || '').slice(0, 200), dir: !!(i && i.dir), size: Number(i && i.size) || 0 }));
       this.incoming = { id: m.id, items, files: Number(m.files) || 0, bytes: Number(m.bytes) || 0, at: Date.now(),
         list: Array.isArray(m.list) ? m.list : null, dirs: Array.isArray(m.dirs) ? m.dirs : [] }; // The whole tree
       this.onChange();
+      if (this.clip) this.clip.fileOffered(this.incoming, m);
     });
     link.on(T.FCLIP_GONE, (m) => {
       if (this.incoming && this.incoming.id === m.id) this.incoming = null;
@@ -132,15 +137,37 @@ class FileClip {
     } catch (_) { /* no helper: nothing to copy */ }
     paths = paths.filter((p) => typeof p === 'string' && fs.existsSync(p));
     if (!paths.length) return this.popup('home', 'Select files in File Explorer first');
-    const plan = this.fileDrop.plan(paths);
-    if (!plan || !plan.jobs.length) return this.popup('home', 'Nothing to copy there');
-    if (this.offer) this.link.send({ t: T.FCLIP_GONE, id: this.offer.id }); // newest copy wins
-    const files = plan.jobs.length;
-    this.offer = { id: crypto.randomUUID(), paths, items: plan.items, files, bytes: plan.bytes };
-    // list/dirs: every file and folder, so a PC can paste it with Windows' own copy.
-    this.link.send({ t: T.FCLIP_OFFER, id: this.offer.id, items: plan.items, files, bytes: plan.bytes, list: plan.list, dirs: plan.dirs });
-    this.popup('away', 'Copied ' + (plan.items.length === 1 ? plan.items[0].name : plural(plan.items.length, 'item')) + ' for ' + this.peerName());
+    const id = crypto.randomUUID();
+    const sent = this.announce(paths, this.clip ? this.clip.latest.copied('files', id) : {}, id);
+    if (!sent) return this.popup('home', 'Nothing to copy there');
+    this.popup('away', 'Copied ' + (sent.items.length === 1 ? sent.items[0].name : plural(sent.items.length, 'item')) + ' for ' + this.peerName());
     this.onChange();
+  }
+
+  // Tell the other computer about files copied here (the shortcut, or Ctrl+C seen by clip.js):
+  // `stamp` is the time of the copy. eagerMB: the other side fetches a set up to that size at once;
+  // above it (or without) it pastes with its shortcut. Returns the plan sent, or null.
+  // `to`: ids of the devices to tell (a copy from the clipboard goes to every device that takes
+  // files, the offer is never relayed); without it only the selected device hears of it.
+  announce(paths, stamp, id, eagerMB = 0, fromClipboard = false, to = null) {
+    const plan = this.fileDrop.plan(paths);
+    if (!plan || !plan.jobs.length) return null;
+    const tell = (msg, ids) => (ids && this.bus ? ids.forEach((x) => this.bus.send(x, msg)) : this.link.send(msg));
+    if (this.offer) tell({ t: T.FCLIP_GONE, id: this.offer.id }, this.offer.to); // newest copy wins
+    const files = plan.jobs.length;
+    this.offer = { id, paths, items: plan.items, files, bytes: plan.bytes, to };
+    const eager = eagerMB > 0 && plan.bytes <= eagerMB * MB;
+    // list/dirs: every file and folder, so a PC can paste it with Windows' own copy.
+    tell({ t: T.FCLIP_OFFER, id, items: plan.items, files, bytes: plan.bytes, list: plan.list, dirs: plan.dirs, ...stamp,
+      ...(eager ? { eager: true } : fromClipboard ? { lazy: true } : {}) }, to);
+    this.onChange();
+    return plan;
+  }
+
+  // Files copied on the other computer are too big to come by themselves: say how to paste them.
+  notice(inc) {
+    if (!this.cfg.shortcuts) return;
+    this.popup('home', this.peerName() + ' copied ' + (inc.bytes >= MB ? Math.round(inc.bytes / MB) + ' MB' : plural(inc.files, 'file')) + ': use ' + keysLabel(this.cfg.pasteKeys) + ' to paste');
   }
 
   async paste() {

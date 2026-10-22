@@ -245,10 +245,12 @@ function start() {
     bus: hub.bus, mesh, helper, settings, save: saveSettings, selfIds: [AUMID, 'org.macshare.windows', 'org.macshare.mesh.windows'],
     peerName: (id) => ((mesh.get(id) || {}).name || ''), selfName: () => device.name, onChange: pushState,
   });
-  fileClip = new FileClip({ link, helper, fileDrop, fileRecv, dragRecv, settings, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
+  fileClip = new FileClip({ link, bus: hub.bus, helper, clip, fileDrop, fileRecv, dragRecv, settings, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
   // A paste Windows copies itself (dragrecv.js) — its files skip filerecv.js.
   fileRecv.claims = (m) => dragRecv._pasteOf(m);
   dragRecv.onPasted = (b) => fileClip.pasted(b);
+  clip.attachFiles({ helper, fileClip, cacheDir: path.join(app.getPath('userData'), 'clipfiles') });
+  clip.start(); // every copy is stamped from here on (clipsync.js)
   kvm.fileClip = fileClip; // Our copy/paste shortcut while driving → fclip.key
   sendTo = new SendTo({ link, fileDrop, peerName: () => (peerView() || {}).name || '', popup: (kind, text, sub) => hud.show(kind, text, sub) });
   // Copy/paste and Send files show progress in the popup, like a drag. Receiving: every
@@ -296,6 +298,7 @@ function start() {
   });
   fileRecv.onBatch = (b) => {
     liveDone('recv', b.files ? 'Received ' + plural(b.files, 'file') : 'Nothing arrived', b.files ? 'From ' + peerName() : '');
+    if (clip.filesArrived(b)) return; // fetched by the clipboard: it puts them on the clipboard
     if (b.kind === 'paste') fileClip.pasted(b);
     else if (b.files) hud.show('driven', 'Received ' + b.files + ' file' + (b.files === 1 ? '' : 's') + ' from ' + peerName());
   };

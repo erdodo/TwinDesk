@@ -26,6 +26,12 @@ UI.tab({
     const maxKB = UI.select([
       { value: 16, label: '16 KB' }, { value: 64, label: '64 KB' }, { value: 256, label: '256 KB' },
     ], (v) => set({ maxKB: Number(v) }));
+    const images = UI.switch((v) => set({ images: v }), { label: 'Images' });
+    const files = UI.switch((v) => set({ files: v }), { label: 'Files' });
+    const filesMaxMB = UI.select([
+      { value: 10, label: '10 MB' }, { value: 25, label: '25 MB' }, { value: 50, label: '50 MB' },
+      { value: 100, label: '100 MB' }, { value: 250, label: '250 MB' },
+    ], (v) => set({ filesMaxMB: Number(v) }));
     const historySize = UI.select([
       { value: 0, label: 'Off' }, { value: 10, label: '10 items' }, { value: 20, label: '20 items' },
       { value: 50, label: '50 items' }, { value: 100, label: '100 items' },
@@ -41,6 +47,11 @@ UI.tab({
     body.append(
       pair.el,
       UI.card('', [modeRow]),
+      UI.card('What is shared', [
+        UI.row('Images', 'Screenshots and copied pictures', [images]),
+        UI.row('Files', 'Copied in File Explorer', [files]),
+        UI.row('Largest files', 'Bigger ones wait for the paste shortcut (Files tab)', [filesMaxMB]),
+      ]),
       UI.card('Privacy', [
         UI.row('Skip passwords', 'From password managers', [concealed]),
         UI.row('Largest item', '', [maxKB]),
@@ -57,6 +68,9 @@ UI.tab({
       mode.set(c.mode);
       modeRow.setHint(c.mode === 'instant' ? 'As soon as you copy' : 'When you move to the other computer');
       concealed.set(c.skipConcealed);
+      images.set(c.images);
+      files.set(c.files);
+      filesMaxMB.set(c.filesMaxMB);
       maxKB.set(c.maxKB);
       historySize.set(c.historySize);
       const refused = s.link.state === 'connected' && !c.peerAccepts;

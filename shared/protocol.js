@@ -55,6 +55,8 @@
     HOTKEYS: ['AltRight', 'AltLeft', 'Alt', 'ControlRight', 'ControlLeft', 'Control',
       'ShiftRight', 'ShiftLeft', 'Shift', 'MetaRight', 'MetaLeft', 'Meta'],
     CLIP_MAX_BYTES: 256 * 1024, // clipboard text limit (UTF-8)
+    CLIP_IMAGE_MAX_BYTES: 8 * 1024 * 1024, // clipboard image limit (PNG bytes, before base64)
+    CLIP_SKEW_MS: 10 * 60 * 1000, // a copy time further ahead of our clock than this is clamped (a clock that wrong must not win for ever)
     FILE_CHUNK_BYTES: 64 * 1024, // raw bytes per file.chunk (base64 on the wire)
     FILE_MAX_BYTES: 4 * 1024 * 1024 * 1024, // largest dropped file
     SIDES: ['left', 'right', 'top', 'bottom'],
@@ -116,6 +118,10 @@
       CLIP: 'clip',
       CLIP_REQUEST: 'clip.request',
       CLIP_POLICY: 'clip.policy', // either way: {accept} — whether this side applies clip from the other
+      // The latest copy wins (shared/clipsync.js): `clip`, `clip.image` and `fclip.offer` carry {ts, o}: when
+      // the copy happened (a hybrid logical clock, ms) and on which device. An older item never replaces a newer one.
+      CLIP_IMAGE: 'clip.image', // either way: {id, ts, o, w, h, png: base64} an image on the clipboard
+      CLIP_LATEST: 'clip.latest', // either way, after welcome: {ts, o, kind: 'text'|'image'|'files'} what this side holds as the newest copy
       // roadmap,
       AUDIO_POLICY: 'audio.policy', // W->M {accept}: the PC plays the Mac's sound
       SSH_KEY: 'ssh.key', // W->M {pub}

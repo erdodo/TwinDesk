@@ -1,0 +1,206 @@
+// Tests for linux/clip.js (ordering, images, files) with a fake clipboard and link; no Electron needed.
+// Run with: NODE_PATH=/path/to/node_modules node linux/test/clip.js
+'use strict';
+const assert = require('assert');
+const Module = require('module');
+const path = require('path');
+const { EventEmitter } = require('events');
+
+// ---- fake electron ----
+const board = { text: '', png: null, formats: [], buffers: {}, writes: [] };
+const clearBoard = () => Object.assign(board, { text: '', png: null, formats: [], buffers: {} });
+const electron = {
+  clipboard: {
+    availableFormats: () => board.formats.slice(),
+    readText: () => board.text,
+    readBuffer: (f) => board.buffers[f] || Buffer.alloc(0),
+    readImage: () => ({ toPNG: () => board.png }),
+    writeText: (t) => { clearBoard(); board.text = t; board.formats = ['text/plain']; board.writes.push('text'); },
+    writeImage: (img) => { clearBoard(); board.png = img.buf; board.formats = ['image/png']; board.buffers['image/png'] = img.buf; board.writes.push('image'); },
+    writeBuffer: (f, b) => { clearBoard(); board.buffers[f] = b; board.formats = [f]; },
+  },
+  nativeImage: { createFromBuffer: (buf) => ({ buf, isEmpty: () => !buf.length, getSize: () => ({ width: 4, height: 3 }) }) },
+  app: { getPath: () => '/tmp' },
+};
+const load = Module._load;
+Module._load = function (request, ...rest) { return request === 'electron' ? electron : load.call(this, request, ...rest); };
+
+const P = require('../../shared/protocol.js');
+const Clip = require('../clip.js');
+const io = require('../clipio.js');
+const T = P.T;
+
+const PNG = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(String(n))]);
+const copyText = (t) => { clearBoard(); board.text = t; board.formats = ['text/plain']; };
+const copyImage = (png) => { clearBoard(); board.png = png; board.formats = ['image/png']; board.buffers['image/png'] = png; };
+const copyFiles = (...paths) => { clearBoard(); board.formats = ['text/uri-list']; board.buffers['text/uri-list'] = Buffer.from(paths.map((p) => 'file://' + p).join('\r\n')); };
+
+function setup(settings = {}) {
+  const link = new EventEmitter();
+  link.on = link.addListener;
+  link.sent = [];
+  link.status = { state: 'connected' };
+  link.send = (m) => { link.sent.push(m); return true; };
+  const now = { t: 1000 };
+  const cfg = { enabled: true, send: true, receive: true, mode: 'instant', skipConcealed: true, maxKB: 256, historySize: 20, images: true, files: true, filesMaxMB: 50, ...settings };
+  const clip = new Clip(link, () => cfg, () => {}, { selfId: 'L', now: () => now.t });
+  clearBoard();
+  return { clip, link, now, cfg, deliver: (m) => link.emit(m.t, m), sent: (t) => link.sent.filter((m) => m.t === t) };
+}
+const settle = () => new Promise((r) => setImmediate(r));
+
+(async () => {
+  // The reported bug: the other computer copied A, we copied B later; A's late push must not win.
+  {
+    const s = setup();
+    await s.clip._scan(); // first look: whatever is there is not a copy
+    await s.deliver({ t: T.CLIP, text: 'A', ts: 1000, o: 'W' }); await settle();
+    assert.strictEqual(board.text, 'A', 'the first copy is applied');
+    await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP).length, 0, 'applying is not seen as a local copy (no echo)');
+    s.now.t = 2000;
+    copyText('B');
+    await s.clip._scan();
+    const out = s.sent(T.CLIP);
+    assert.strictEqual(out.length, 1);
+    assert.strictEqual(out[0].text, 'B');
+    s.now.t = 2500;
+    await s.deliver({ t: T.CLIP, text: 'A', ts: 1000, o: 'W' }); await settle(); // late push of the older copy
+    assert.strictEqual(board.text, 'B', 'the late A does not replace the newer B');
+    await s.deliver({ t: T.CLIP, text: 'A2', ts: 1900, o: 'W' }); await settle();
+    assert.strictEqual(board.text, 'B', 'a copy made before B, arriving after it, is ignored');
+    await s.deliver({ t: T.CLIP, text: 'C', ts: 2600, o: 'W' }); await settle();
+    assert.strictEqual(board.text, 'C', 'a newer copy is applied');
+    await s.deliver({ t: T.CLIP, text: 'old app' }); await settle();
+    assert.strictEqual(board.text, 'old app', 'an older app sends no time: counts as copied on arrival');
+  }
+
+  // A local copy is noticed (and stamped) in switch mode too; a late send keeps the time of the copy.
+  {
+    const s = setup({ mode: 'switch' });
+    await s.clip._scan();
+    s.now.t = 3000;
+    copyText('local');
+    await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP).length, 0, 'switch mode sends nothing yet');
+    s.now.t = 9000;
+    await s.deliver({ t: T.CLIP, text: 'late', ts: 2000, o: 'W' }); await settle();
+    assert.strictEqual(board.text, 'local', 'the copy made here is newer than the push, though nothing was sent');
+    s.now.t = 9500;
+    await s.clip.sendIfChanged();
+    const m = s.sent(T.CLIP);
+    assert.strictEqual(m.length, 1);
+    assert.strictEqual(m[0].ts, 3000, 'the message carries the time of the copy, not of sending');
+    assert.strictEqual(m[0].o, 'L');
+    await s.deliver({ t: T.CLIP_REQUEST, force: true }); await settle();
+    assert.strictEqual(s.sent(T.CLIP).length, 2);
+    assert.strictEqual(s.sent(T.CLIP)[1].ts, 3000, 'a request answer keeps the original time');
+    await s.deliver({ t: T.CLIP_REQUEST }); await settle();
+    assert.strictEqual(s.sent(T.CLIP).length, 2, 'an older app asking again gets nothing twice');
+  }
+
+  // After welcome: clip.latest goes out; a newer one on the other side is requested.
+  {
+    const s = setup();
+    await s.clip._scan();
+    s.now.t = 4000;
+    copyText('mine');
+    await s.clip._scan();
+    s.link.emit('welcome', {});
+    const l = s.sent(T.CLIP_LATEST);
+    assert.strictEqual(l.length, 1);
+    assert.deepStrictEqual([l[0].ts, l[0].o, l[0].kind], [4000, 'L', 'text']);
+    await s.deliver({ t: T.CLIP_LATEST, ts: 3000, o: 'W', kind: 'text' }); await settle();
+    assert.strictEqual(s.sent(T.CLIP_REQUEST).length, 0, 'older: not asked for');
+    await s.deliver({ t: T.CLIP_LATEST, ts: 5000, o: 'W', kind: 'text' }); await settle();
+    assert.strictEqual(s.sent(T.CLIP_REQUEST).length, 1, 'newer: asked for');
+    assert.strictEqual(s.sent(T.CLIP_REQUEST)[0].force, true);
+  }
+
+  // Images: sent as clip.image with the time of the copy, applied when newer, switch off honoured.
+  {
+    const s = setup();
+    await s.clip._scan();
+    s.now.t = 5000;
+    copyImage(PNG(1));
+    await s.clip._scan();
+    const im = s.sent(T.CLIP_IMAGE);
+    assert.strictEqual(im.length, 1);
+    assert.strictEqual(im[0].ts, 5000);
+    assert.strictEqual(Buffer.from(im[0].png, 'base64').equals(PNG(1)), true);
+    const other = { t: T.CLIP_IMAGE, id: 'img2', w: 2, h: 2, png: PNG(2).toString('base64'), ts: 6000, o: 'W' };
+    await s.deliver(other); await settle();
+    assert.strictEqual(board.png.equals(PNG(2)), true, 'a newer image is applied');
+    await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP_IMAGE).length, 1, 'the applied image is not sent back');
+    await s.deliver({ ...other, id: 'img3', png: PNG(3).toString('base64'), ts: 5500 }); await settle();
+    assert.strictEqual(board.png.equals(PNG(2)), true, 'an older image is ignored');
+    s.cfg.images = false;
+    copyImage(PNG(4));
+    await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP_IMAGE).length, 1, 'images off: not sent');
+    await s.deliver({ ...other, id: 'img5', png: PNG(5).toString('base64'), ts: 9000 }); await settle();
+    assert.strictEqual(board.png.equals(PNG(4)), true, 'images off: not applied');
+    s.cfg.images = true;
+    await s.deliver({ ...other, id: 'bad', png: Buffer.from('not a png').toString('base64'), ts: 9500 }); await settle();
+    assert.strictEqual(board.png.equals(PNG(4)), true, 'not a PNG: ignored');
+  }
+
+  // Text beats an image copied with it; files beat the text a file manager adds.
+  {
+    const s = setup();
+    await s.clip._scan();
+    s.now.t = 7000;
+    board.text = 'cell'; board.png = PNG(7); board.formats = ['text/plain', 'image/png']; board.buffers['image/png'] = PNG(7);
+    await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP).length, 1);
+    assert.strictEqual(s.sent(T.CLIP_IMAGE).length, 0);
+  }
+  {
+    const s = setup();
+    const copied = [];
+    s.clip.fileClip = { clipCopied: (p, st, limit) => copied.push([p, st, limit]), clipboardFiles: async () => [], isCache: (p) => p[0].startsWith('/cache/'), acceptFiles: async () => true };
+    await s.clip._scan();
+    s.now.t = 8000;
+    copyFiles('/home/u/a.txt', '/home/u/b%20c.txt');
+    board.text = 'a.txt\nb c.txt';
+    board.formats.push('text/plain');
+    await s.clip._scan();
+    assert.strictEqual(copied.length, 1);
+    assert.deepStrictEqual(copied[0][0], ['/home/u/a.txt', '/home/u/b c.txt']);
+    assert.strictEqual(copied[0][1].ts, 8000);
+    assert.strictEqual(copied[0][2], 50 * 1048576);
+    assert.strictEqual(s.sent(T.CLIP).length, 0, 'the names are not sent as text');
+    s.now.t = 8500;
+    copyFiles('/cache/x/a.txt');
+    await s.clip._scan();
+    assert.strictEqual(copied.length, 1, 'received files in the cache are never announced again');
+    s.cfg.files = false;
+    copyFiles('/home/u/c.txt');
+    await s.clip._scan();
+    assert.strictEqual(copied.length, 1, 'files off: not announced');
+  }
+
+  // Receiving files: applyFiles only while that offer is still the newest copy.
+  {
+    const s = setup();
+    const written = [];
+    const w = io.writeFiles;
+    io.writeFiles = async (p) => { written.push(p); copyFiles(...p); return true; };
+    await s.clip._scan();
+    assert.strictEqual(await s.clip.acceptFiles({ id: 'o1', ts: 1500, o: 'W' }), true);
+    assert.strictEqual(await s.clip.acceptFiles({ id: 'o0', ts: 1200, o: 'W' }), false, 'an older offer');
+    assert.strictEqual(await s.clip.applyFiles(['/cache/o1/a'], 'o1'), true);
+    await s.clip._scan();
+    assert.strictEqual(s.link.sent.length, 0, 'a received file list is not a local copy');
+    assert.strictEqual(await s.clip.acceptFiles({ id: 'o2', ts: 1700, o: 'W' }), true);
+    s.now.t = 3000;
+    copyText('typed meanwhile');
+    assert.strictEqual(await s.clip.applyFiles(['/cache/o2/a'], 'o2'), false, 'a newer local copy keeps the clipboard');
+    assert.strictEqual(written.length, 1);
+    io.writeFiles = w;
+  }
+
+  console.log('linux/test/clip.js: all passed');
+  process.exit(0);
+})().catch((e) => { console.error(e); process.exit(1); });
