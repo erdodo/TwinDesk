@@ -7,6 +7,9 @@
 const { clipboard, nativeImage } = require('electron');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const guard = require('../shared/clipguard.js');
 const { pathToFileURL, fileURLToPath } = require('url');
 
 const FILE_FORMATS = ['x-special/gnome-copied-files', 'text/uri-list'];
@@ -28,8 +31,43 @@ function filesIn(text) {
   return out.slice(0, 1000);
 }
 
+// ---- content keys (shared/clipguard.js): what tells two clipboard states apart. Never the format
+// list or the PNG bytes: the system and the owner of the clipboard change those on their own. ----
+
+// An image by size + a sample of its pixels; decoded only when the PNG bytes are new.
+const imageKeys = new Map(); // sha of the PNG → key (a few)
+function imageKeyOf(png) {
+  const h = sha(png);
+  if (imageKeys.has(h)) return imageKeys.get(h);
+  let key = 'i?:' + h; // cannot decode: the bytes are all there is
+  try {
+    const img = nativeImage.createFromBuffer(png);
+    const { width, height } = img.getSize();
+    const bmp = img.toBitmap();
+    if (bmp && bmp.length >= 4) {
+      const hash = crypto.createHash('sha1');
+      const step = Math.max(4, (Math.floor(bmp.length / 4 / 512) || 1) * 4); // about 512 pixels
+      for (let i = 0; i + 4 <= bmp.length; i += step) hash.update(bmp.subarray(i, i + 4));
+      key = guard.imageKey(width, height, hash.digest('hex'));
+    }
+  } catch (_) { /* keep the byte hash */ }
+  if (imageKeys.size > 8) imageKeys.clear();
+  imageKeys.set(h, key);
+  return key;
+}
+
+// Files by names and sizes (a folder by its name).
+function filesKeyOf(paths) {
+  return guard.filesKey(paths.map((p) => {
+    let size = 0;
+    try { const st = fs.statSync(p); size = st.isFile() ? st.size : 0; } catch (_) { /* gone */ }
+    return { name: path.basename(p), size };
+  }));
+}
+
 // What is on the clipboard now: {kind: 'text'|'image'|'files'|'none', key, text?, png?, paths?}.
-// key tells two states apart (text itself, the PNG's hash, the list of paths). Files win over text
+// key tells two states apart by content (text without its line-break style, an image's pixels, the
+// files' names and sizes). Files win over text
 // (a file manager puts the names there too), text wins over an image (a page or a table copies both).
 async function probe() {
   let formats = [];
@@ -38,17 +76,17 @@ async function probe() {
     if (!formats.includes(f)) continue;
     let paths = [];
     try { paths = filesIn(clipboard.readBuffer(f).toString('utf8')); } catch (_) { /* gone meanwhile */ }
-    if (paths.length) return { kind: 'files', key: 'f:' + paths.join('\n'), paths };
+    if (paths.length) return { kind: 'files', key: filesKeyOf(paths), paths };
   }
   const text = await readText();
-  if (text.trim()) return { kind: 'text', key: 't:' + text, text };
+  if (text.trim()) return { kind: 'text', key: guard.textKey(text), text };
   let png = null;
   try {
     if (formats.includes('image/png')) png = clipboard.readBuffer('image/png');
     else if (formats.some((f) => f.startsWith('image/'))) png = clipboard.readImage().toPNG();
   } catch (_) { /* gone meanwhile */ }
-  if (png && png.length) return { kind: 'image', key: 'i:' + sha(png), png };
-  return text ? { kind: 'text', key: 't:' + text, text } : { kind: 'none', key: '', formats };
+  if (png && png.length) return { kind: 'image', key: imageKeyOf(png), png };
+  return text ? { kind: 'text', key: guard.textKey(text), text } : { kind: 'none', key: '', formats };
 }
 
 function writeText(text) {
@@ -121,4 +159,4 @@ function writeFiles(paths) {
   });
 }
 
-module.exports = { probe, readText, filesIn, writeText, writeImage, imageSize, writeFiles, missingTool, fileData, sha };
+module.exports = { probe, readText, filesIn, writeText, writeImage, imageSize, writeFiles, missingTool, imageKeyOf, filesKeyOf, textKey: guard.textKey, fileData, sha };

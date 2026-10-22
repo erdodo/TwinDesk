@@ -121,7 +121,8 @@ UI.tab({
       peerRow.hidden = !refused;
       peerRow.label.textContent = 'Turned off on ' + UI.peer(s).name;
       peerRow.setHint('');
-      skipNote.set(c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
+      const paused = c.enabled && c.paused && c.pausedUntil > Date.now();
+      skipNote.set(paused ? 'Clipboard sync paused for 30 s: copies were coming in too fast (a loop?)' : c.enabled && c.lastSkip ? 'Last item not sent: ' + c.lastSkip + '.' : '');
       clearBtn.disabled = !c.history.length;
 
       const key = JSON.stringify(c.history.map((h) => [h.id, h.kept])) + c.historySize + Math.floor(Date.now() / 15000);
