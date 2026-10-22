@@ -116,6 +116,7 @@ class FileClip(core: Core) : Feature(core) {
         val clip = ClipData.newUri(cr, Clip.IN_LABEL, b.placed[0].first)
         for ((uri, _) in b.placed.drop(1)) clip.addItem(cr, ClipData.Item(uri))
         core.clip.setIncoming(clip)
+        core.clip.recordReceived(b.placed.map { it.first })
         status = "${describe(o)} copied"
         incoming = null
         if (quiet) return core.changed()

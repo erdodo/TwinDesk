@@ -7,7 +7,10 @@
 // sheet and the Quick Settings tile; with wireless debugging on (READ_CLIPBOARD_IN_BACKGROUND) the
 // clipboard is read at once, the Mac also follows the phone's clipboard itself (scrcpy). A copy we
 // cannot read yet is stamped when the clipboard changes (the listener always fires) and sent, with
-// that time, as soon as we are in front.
+// that time, as soon as we are in front, or at once when "Display over other apps" is allowed: then
+// ClipFocus.kt takes the input focus for a moment (a 1 px overlay window) and reads it.
+// The Recent list (ClipHistory.kt) keeps what went either way: text in memory, images and files in
+// the cache folder (wiped when the app starts and by Clear), to copy again and to preview.
 // Images are sent as PNG (clip.image) and come back as a cache file behind our FileProvider; files
 // (a file list on the clipboard) go with fclip.offer, FileClip.kt moves them.
 package com.twindesk.android
@@ -16,10 +19,12 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import android.util.LruCache
 import androidx.core.content.FileProvider
 import com.twindesk.android.ClipSync.Stamp
 import org.json.JSONObject
@@ -51,7 +56,9 @@ class Clip(core: Core) : Feature(core) {
     @Volatile var peerAccepts = false; private set
     @Volatile var lastIn: String? = null; private set
     @Volatile var lastOut: String? = null; private set
-    private val history = ArrayDeque<Pair<String, String>>() // (dir, text), newest first
+    val hist = ClipHistory(File(core.ctx.cacheDir, "clip-history"), 20)
+    private val thumbs = LruCache<String, Bitmap>(24)
+    private val focus = ClipFocus(core.ctx, { core.link.connected && core.sync.get("clipboard", "out") && peerAccepts }) { sendCurrent(false) }
 
     private var own: Own? = null
     private var pending: Stamp? = null // copied, but not readable yet (we were not in front)
@@ -61,13 +68,70 @@ class Clip(core: Core) : Feature(core) {
     val clipDir get() = File(core.ctx.cacheDir, "clip")
 
     init {
+        hist.wipe() // what an earlier run kept
         core.ctx.mainExecutor.execute {
             cm.addPrimaryClipChangedListener { noticed() }
         }
         io.execute { runCatching { clipDir.deleteRecursively() } } // what an earlier run left
     }
 
-    fun recent(): List<Pair<String, String>> = synchronized(history) { history.toList() }
+    // "Display over other apps" allowed: copies made while we are behind are read with a moment of focus.
+    val overlayAllowed get() = focus.allowed
+
+    // Wireless debugging granted the background clipboard read (adb pm grant ... READ_CLIPBOARD_IN_BACKGROUND).
+    val backgroundGranted get() = core.ctx.checkSelfPermission("android.permission.READ_CLIPBOARD_IN_BACKGROUND") == PackageManager.PERMISSION_GRANTED
+
+    // ---- the Recent list ----
+
+    fun recent(): List<ClipHistory.Row> = hist.list()
+
+    fun clearHistory() {
+        hist.clear()
+        thumbs.evictAll()
+        core.changed()
+    }
+
+    // A small picture of a kept image (sampled while decoding), or null.
+    fun thumbnail(id: String): Bitmap? {
+        thumbs.get(id)?.let { return it }
+        val f = (hist.content(id) as? ClipHistory.Content.Image)?.file ?: return null
+        return decode(f, 160)?.also { thumbs.put(id, it) }
+    }
+
+    // Put an item of the list on the clipboard again: a new copy made now, it goes out like any copy.
+    fun copyAgain(id: String) {
+        io.execute { runCatching { copyHistory(id) }.onFailure { Log.w("TwinDesk", "clip copy again: ${it.message}") } }
+    }
+
+    @Synchronized private fun copyHistory(id: String) {
+        val cr = core.ctx.contentResolver
+        fun uri(f: File) = FileProvider.getUriForFile(core.ctx, "${core.ctx.packageName}.files", f)
+        // (labelled as ours so the listener leaves it alone; the copy is stamped here, once)
+        val (clip, c) = when (val h = hist.content(id) ?: return) {
+            is ClipHistory.Content.Text ->
+                ClipData.newPlainText(IN_LABEL, h.text) to Content("text", "t:${h.text}", text = h.text)
+            is ClipHistory.Content.Image -> {
+                val png = h.file.readBytes()
+                ClipData.newUri(cr, IN_LABEL, uri(h.file)) to Content("image", "i:${png.size}:${Proto.sha256(png).hex().take(16)}", png = png, w = h.w, h = h.h)
+            }
+            is ClipHistory.Content.Files -> {
+                val uris = h.paths.filter { it.isFile }.map { uri(it) }
+                if (uris.isEmpty()) return
+                val d = ClipData.newUri(cr, IN_LABEL, uris[0])
+                for (u in uris.drop(1)) d.addItem(cr, ClipData.Item(u))
+                d to Content("files", "u:" + uris.joinToString("|"), uris = uris)
+            }
+        }
+        selfUntil = System.currentTimeMillis() + 2000
+        cm.setPrimaryClip(clip)
+        pending = null
+        lastSig = c.sig
+        val o = Own(latest.copied(c.kind), c)
+        own = o
+        if (c.kind != "files") core.fclip.retire()
+        transmit(o, false)
+        core.changed()
+    }
 
     fun sendPolicy() {
         core.send(msg(Proto.T.CLIP_POLICY, "accept" to core.sync.get("clipboard", "in")))
@@ -116,6 +180,7 @@ class Clip(core: Core) : Feature(core) {
             own = null
             lastSig = null
             core.fclip.retire()
+            focus.request()
             return
         }
         take(clip, false)
@@ -211,7 +276,7 @@ class Clip(core: Core) : Feature(core) {
     private fun sendTextMessage(text: String, st: Stamp): Boolean {
         if (text.isEmpty() || text.toByteArray().size > Proto.CLIP_MAX_BYTES) return false
         lastOut = text
-        remember("out", text)
+        hist.addText("out", text)
         core.send(msg(Proto.T.CLIP, "text" to text, "ts" to st.ts, "o" to st.o))
         core.changed()
         return true
@@ -226,6 +291,7 @@ class Clip(core: Core) : Feature(core) {
                 "png" to Base64.getEncoder().encodeToString(png), "ts" to st.ts, "o" to st.o,
             ),
         )
+        hist.addImage("out", png, c.w, c.h)
         core.changed()
         return true
     }
@@ -236,7 +302,22 @@ class Clip(core: Core) : Feature(core) {
         if (!core.store.flag("clipboard.files", true)) return false
         val items = core.files.describe(c.uris)
         if (items.isEmpty()) return false
-        return core.fclip.copy(items, st)
+        val sent = core.fclip.copy(items, st)
+        if (sent) recordFiles("out", items)
+        return sent
+    }
+
+    // Files that went or came: kept in the Recent list (copied from where they are readable now).
+    fun recordFiles(dir: String, items: List<Files.Item>) {
+        val cr = core.ctx.contentResolver
+        val src = items.map { i -> ClipHistory.Src(i.name, i.size) { runCatching { cr.openInputStream(i.uri) }.getOrNull() } }
+        runCatching { hist.addFiles(dir, src) }.onFailure { Log.w("TwinDesk", "clip history: ${it.message}") }
+        core.changed()
+    }
+
+    // The computer's files arrived and are on the clipboard.
+    fun recordReceived(uris: List<Uri>) {
+        io.execute { runCatching { recordFiles("in", core.files.describe(uris)) } }
     }
 
     // Text from outside the clipboard (the share sheet, a drop) or the clipboard's text again.
@@ -280,7 +361,7 @@ class Clip(core: Core) : Feature(core) {
     // The computer's copy (text) here, as if copied on the phone.
     fun receiveText(text: String) {
         lastIn = text
-        remember("in", text)
+        hist.addText("in", text)
         setIncoming(ClipData.newPlainText(IN_LABEL, text))
         core.fclip.retire()
         core.changed()
@@ -295,6 +376,7 @@ class Clip(core: Core) : Feature(core) {
             f.writeBytes(img.png)
             val uri = FileProvider.getUriForFile(core.ctx, "${core.ctx.packageName}.files", f)
             setIncoming(ClipData.newUri(core.ctx.contentResolver, IN_LABEL, uri))
+            hist.addImage("in", img.png, img.w, img.h)
             tidy(f)
         }
         core.fclip.retire()
@@ -307,14 +389,6 @@ class Clip(core: Core) : Feature(core) {
         (clipDir.listFiles() ?: return).sortedByDescending { it.lastModified() }.drop(3)
             .filter { it != keep && now - it.lastModified() > 3_600_000L }
             .forEach { runCatching { it.deleteRecursively() } }
-    }
-
-    private fun remember(dir: String, text: String) {
-        synchronized(history) {
-            history.removeAll { it.second == text }
-            history.addFirst(dir to text)
-            while (history.size > 20) history.removeLast()
-        }
     }
 
     override fun onMessage(t: String, m: JSONObject): Boolean {
@@ -345,5 +419,15 @@ class Clip(core: Core) : Feature(core) {
     companion object {
         // The label of what we put on the clipboard ourselves: the listener leaves it alone.
         const val IN_LABEL = "TwinDesk sync"
+
+        // A picture file scaled down while decoding so that neither side is smaller than `px` (0.5 to 1x of it), or null.
+        fun decode(f: File, px: Int): Bitmap? = runCatching {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(f.path, o)
+            if (o.outWidth <= 0 || o.outHeight <= 0) return@runCatching null
+            var s = 1
+            while (o.outWidth / (s * 2) >= px && o.outHeight / (s * 2) >= px) s *= 2
+            BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = s })
+        }.getOrNull()
     }
 }
