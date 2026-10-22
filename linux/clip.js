@@ -10,6 +10,7 @@ const { app, clipboard, nativeImage } = require('electron');
 const { ClipHistory } = require('../shared/clip-history.js');
 const P = require('../shared/protocol.js');
 const sync = require('../shared/clipsync.js');
+const { EchoGuard, Breaker } = require('../shared/clipguard.js');
 const io = require('./clipio');
 
 const POLL_MS = 500; // how often the clipboard is checked for a new copy
@@ -41,7 +42,10 @@ class Clip {
     this.history = new ClipHistory({ dir: opts.historyDir || path.join(app.getPath('userData'), 'cliphist'), max: this.cfg.historySize, maxBytes: 200 * 1048576 });
     this.history.wipe(); // nothing from an earlier run stays on disk
     this.thumbs = new Map(); // history id → data URL
-    this.fromHistory = null; // id of the Recent item being copied again; the next copy seen is that one
+    this.fromHistory = null;
+    this.echo = new EchoGuard({ now: opts.now }); // content we wrote or sent a moment ago: its change is ours
+    this.breaker = new Breaker({ now: opts.now }); // copies faster than a person: pause
+    this.pausedNote = false; // id of the Recent item being copied again; the next copy seen is that one
     this.lastSkip = '';
     this.seen = undefined; // key of the clipboard at the last check (undefined = not looked yet)
     this.item = null; // the copy on the clipboard now: {kind, stamp, p, concealed, sent}
@@ -109,7 +113,7 @@ class Clip {
     let p = await io.probe();
     if (p.kind === 'none' && !p.formats.length && this.fileClip) { // Wayland, TwinDesk in the background: the helper still sees files
       const paths = await this.fileClip.clipboardFiles();
-      if (paths.length) p = { kind: 'files', key: 'f:' + paths.join('\n'), paths };
+      if (paths.length) p = { kind: 'files', key: io.filesKeyOf(paths), paths };
     }
     if (p.kind === 'none') { // nothing to see (empty, or Wayland with TwinDesk in the background)
       if (this.seen === undefined) this.seen = '';
@@ -121,17 +125,29 @@ class Clip {
     this.force = false;
     if (first) return; // already there when TwinDesk started: not a new copy
     if (p.kind === 'files' && this.fileClip && this.fileClip.isCache(p.paths)) return; // files received from the other computer
-    const id = p.kind === 'files' ? io.sha(Buffer.from(p.paths.join('\n'))) : p.kind === 'image' ? io.sha(p.png) : undefined;
-    const item = { kind: p.kind, stamp: this.latest.copied(p.kind, id), p, concealed: !!this.cfg.skipConcealed && isConcealed(), sent: false, again: this.fromHistory };
+    const again = this.fromHistory; // Copy again by the user: a person, never an echo
     this.fromHistory = null;
+    if (!again && this.echo.isEcho(p.key)) return; // the system touching what we wrote: not a copy
+    if (again ? this.breaker.paused : !this.breaker.hit()) { // faster than a person: a loop?
+      if (!this.pausedNote) console.warn('clipboard sync paused: copies were coming in too fast');
+      this.pausedNote = true;
+      this.onChange();
+      return;
+    }
+    this.pausedNote = false;
+    this.echo.note(p.key);
+    const id = p.kind === 'text' ? undefined : p.key;
+    const item = { kind: p.kind, stamp: this.latest.copied(p.kind, id), p, concealed: !!this.cfg.skipConcealed && isConcealed(), sent: false, again };
     this.item = item;
     if (p.kind !== 'files' && this.fileClip) this.fileClip.retract();
     if (this.cfg.mode === 'instant') await this._send(item);
   }
 
   // What the clipboard holds now, remembered so that putting something on it is not seen as a copy.
-  async _settle(kind, stamp) {
+  async _settle(kind, stamp, key) {
+    this.echo.note(key);
     const now = await io.probe();
+    if (now.kind !== 'none') this.echo.note(now.key);
     if (now.kind !== 'none') this.seen = now.key;
     this.item = { kind, stamp, p: now, concealed: false, sent: true };
     this.onChange();
@@ -154,8 +170,8 @@ class Clip {
       await this._check(); // a copy made here a moment ago must be known before judging this one
       if (!this.latest.accept(m, 'text')) return;
       const stamp = this.latest.cur;
-      if ((await io.readText()) !== m.text) io.writeText(m.text);
-      await this._settle('text', stamp);
+      if (io.textKey(await io.readText()) !== io.textKey(m.text)) io.writeText(m.text); // already there: leave it alone
+      await this._settle('text', stamp, io.textKey(m.text));
       this._remember('in', { kind: 'text', text: m.text });
     }).catch(() => {});
   }
@@ -168,8 +184,9 @@ class Clip {
       await this._check();
       if (!this.latest.accept(m, 'image', img.id)) return;
       const stamp = this.latest.cur;
-      if (io.writeImage(img.png)) {
-        await this._settle('image', stamp);
+      const key = io.imageKeyOf(img.png);
+      if ((await io.probe()).key === key || io.writeImage(img.png)) { // already there: not written again
+        await this._settle('image', stamp, key);
         this._remember('in', { kind: 'image', png: img.png, w: img.w, h: img.h });
       }
     }).catch(() => {});
@@ -214,7 +231,7 @@ class Clip {
     if (it.kind === 'image') {
       const png = it.p.png;
       const size = io.imageSize(png);
-      const msg = sync.imageMessage({ id: io.sha(png), w: size.width, h: size.height, png }, it.stamp);
+      const msg = sync.imageMessage({ id: it.p.key, w: size.width, h: size.height, png }, it.stamp);
       it.sent = true;
       if (!msg) return this._skip('skipped an image of ' + Math.round(png.length / 1048576) + ' MB (over ' + P.CLIP_IMAGE_MAX_BYTES / 1048576 + ' MB)');
       if (!this.link.send(msg)) it.sent = false;
@@ -244,8 +261,9 @@ class Clip {
       await this._check();
       const cur = this.latest.cur;
       if (!cur || cur.kind !== 'files' || cur.id !== id) return false; // a newer copy came meanwhile
-      if (!(await io.writeFiles(paths))) return false;
-      await this._settle('files', cur);
+      const key = io.filesKeyOf(paths);
+      if ((await io.probe()).key !== key && !(await io.writeFiles(paths))) return false;
+      await this._settle('files', cur, key);
       this._remember('in', { kind: 'files', files: paths.map((p) => ({ path: p })) });
       return true;
     }).catch(() => false);
@@ -278,6 +296,7 @@ class Clip {
       if (!c) return false;
       await this._check(); // whatever was copied before is stamped before this one
       let ok = true;
+      this.echo.note(c.kind === 'text' ? io.textKey(c.text) : c.kind === 'image' ? io.imageKeyOf(c.png) : io.filesKeyOf(c.paths));
       if (c.kind === 'text') io.writeText(c.text);
       else if (c.kind === 'image') ok = io.writeImage(c.png);
       else ok = await io.writeFiles(c.paths);
@@ -326,6 +345,8 @@ class Clip {
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
+      paused: this.breaker.paused,
+      pausedUntil: this.breaker.until,
       filesNote: this.cfg.files && this.cfg.enabled && this.cfg.receive ? io.missingTool() : '',
       history: rows.map((r) => (r.kind === 'image' && r.kept ? { ...r, thumb: this._thumb(r.id) } : r)),
     };

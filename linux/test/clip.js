@@ -9,19 +9,24 @@ const os = require('os');
 const { EventEmitter } = require('events');
 
 // ---- fake electron ----
-const board = { text: '', png: null, formats: [], buffers: {}, writes: [] };
-const clearBoard = () => Object.assign(board, { text: '', png: null, formats: [], buffers: {} });
+const newBoard = () => ({ text: '', png: null, formats: [], buffers: {}, writes: [], os: null, osIn: 0 });
+let board = newBoard();
+// The system touching the clipboard a moment after a write: board.os runs on the second look after it.
+const osTouch = () => { if (!board.os) return; if (board.osIn-- > 0) return; const f = board.os; board.os = null; f(board); };
+const clearBoard = () => Object.assign(board, { text: '', png: null, formats: [], buffers: {}, os: null });
+// A PNG's "pixels": what follows the 8-byte signature, ignoring padding a re-encoder adds.
+const pixels = (buf) => Buffer.from(buf.subarray(8).toString().replace(/#+$/, '').padEnd(8, '.'));
 const electron = {
   clipboard: {
-    availableFormats: () => board.formats.slice(),
+    availableFormats: () => { osTouch(); return board.formats.slice(); },
     readText: () => board.text,
     readBuffer: (f) => board.buffers[f] || Buffer.alloc(0),
     readImage: () => ({ toPNG: () => board.png }),
-    writeText: (t) => { clearBoard(); board.text = t; board.formats = ['text/plain']; board.writes.push('text'); },
-    writeImage: (img) => { clearBoard(); board.png = img.buf; board.formats = ['image/png']; board.buffers['image/png'] = img.buf; board.writes.push('image'); },
-    writeBuffer: (f, b) => { clearBoard(); board.buffers[f] = b; board.formats = [f]; },
+    writeText: (t) => { const os = board.nextOs; clearBoard(); board.os = os; board.osIn = 1; board.text = t; board.formats = ['text/plain']; board.writes.push('text'); },
+    writeImage: (img) => { const os = board.nextOs; clearBoard(); board.os = os; board.osIn = 1; board.png = img.buf; board.formats = ['image/png']; board.buffers['image/png'] = img.buf; board.writes.push('image'); },
+    writeBuffer: (f, b) => { const os = board.nextOs; clearBoard(); board.os = os; board.osIn = 1; board.buffers[f] = b; board.formats = [f]; },
   },
-  nativeImage: { createFromBuffer: (buf) => ({ buf, isEmpty: () => !buf.length, getSize: () => ({ width: 4, height: 3 }), resize: () => ({ toDataURL: () => 'data:image/png;base64,THUMB' }) }) },
+  nativeImage: { createFromBuffer: (buf) => ({ buf, isEmpty: () => !buf.length, getSize: () => ({ width: 4, height: 3 }), toBitmap: () => pixels(buf), resize: () => ({ toDataURL: () => 'data:image/png;base64,THUMB' }) }) },
   app: { getPath: () => '/tmp' },
 };
 const load = Module._load;
@@ -293,6 +298,127 @@ const settle = () => new Promise((r) => setImmediate(r));
     assert.strictEqual(fs.existsSync(left), false, 'wiped when the app starts');
     c2.shutdown();
     s.clip.shutdown();
+  }
+
+  // ---- the loop: two devices, the system touches the clipboard after each write ----
+  const rig = (cfg) => {
+    const now = { t: 1000 };
+    const mk = (id) => {
+      const d = { id, board: newBoard(), q: [], copied: [], now };
+      d.link = new EventEmitter(); d.link.on = d.link.addListener; d.link.status = { state: 'connected' };
+      d.cfg = { enabled: true, send: true, receive: true, mode: 'instant', skipConcealed: true, maxKB: 256, historySize: 20, images: true, files: true, filesMaxMB: 50, ...cfg };
+      d.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-loop-'));
+      board = d.board;
+      d.clip = new Clip(d.link, () => d.cfg, () => {}, { selfId: id, now: () => now.t, historyDir: path.join(d.dir, 'h') });
+      d.clip.fileClip = { retract() {}, clipCopied: (p) => d.copied.push(p), clipboardFiles: async () => [], isCache: () => false, acceptFiles: (m) => d.clip.acceptFiles(m) };
+      return d;
+    };
+    const a = mk('A'); const b = mk('B');
+    let total = 0;
+    a.link.send = (m) => { total++; b.q.push(m); return true; };
+    b.link.send = (m) => { total++; a.q.push(m); return true; };
+    const use = (d) => { board = d.board; };
+    const pump = async (rounds = 8) => {
+      for (let r = 0; r < rounds; r++) {
+        now.t += 700;
+        for (const d of [a, b]) {
+          use(d);
+          await d.clip._scan();
+          while (d.q.length) {
+            const m = d.q.shift();
+            if (m.t === 'files') await d.clip.acceptFiles(m.m) && await d.clip.applyFiles(m.paths, m.m.id);
+            else d.link.emit(m.t, m);
+            await d.clip.chain; await settle();
+          }
+        }
+      }
+    };
+    // files are announced through fileClip: the other side "pulls" them into its own folder
+    for (const [from, to] of [[a, b], [b, a]]) {
+      from.clip.fileClip.clipCopied = (paths, stamp) => {
+        total++;
+        const dir = fs.mkdtempSync(path.join(to.dir, 'in-'));
+        const got = paths.map((p) => { const t = path.join(dir, path.basename(p)); fs.copyFileSync(p, t); return t; });
+        to.q.push({ t: 'files', m: { id: 'f' + stamp.ts, ts: stamp.ts, o: stamp.o }, paths: got });
+      };
+    }
+    return { a, b, now, use, pump, total: () => total, count: (d, t) => d.q.length + 0 * t };
+  };
+  const io0 = io.writeFiles;
+  io.writeFiles = async (paths) => { board.nextOs = board.nextOs; const os = board.nextOs; clearBoard(); board.os = os; board.osIn = 1; board.formats = ['text/uri-list']; board.buffers['text/uri-list'] = Buffer.from(paths.map((p) => 'file://' + p).join('\r\n')); return true; };
+
+  // (a) text: the other system rewrites the line breaks
+  {
+    const r = rig();
+    r.use(r.a); await r.a.clip._scan(); r.use(r.b); await r.b.clip._scan();
+    r.b.board.nextOs = (bd) => { bd.text = bd.text.replace(/\n/g, '\r\n'); };
+    r.now.t = 5000; r.use(r.a); copyText('line1\nline2');
+    await r.pump();
+    assert.ok(r.total() <= 4, 'text: settles (' + r.total() + ' messages)');
+    assert.strictEqual(r.b.board.text, 'line1\r\nline2');
+    assert.strictEqual(r.a.board.text, 'line1\nline2', 'A keeps its own');
+  }
+  // (b) image: bytes re-encoded and the format list changed after the first read
+  {
+    const r = rig();
+    r.use(r.a); await r.a.clip._scan(); r.use(r.b); await r.b.clip._scan();
+    r.b.board.nextOs = (bd) => { const p = Buffer.concat([bd.png, Buffer.from('##')]); bd.png = p; bd.buffers['image/png'] = p; bd.formats = ['image/png', 'image/bmp', 'image/tiff']; };
+    r.now.t = 5000; r.use(r.a); copyImage(PNG(31));
+    await r.pump();
+    assert.ok(r.total() <= 4, 'image: settles (' + r.total() + ' messages)');
+  }
+  // (c) files: the list is rewritten (another folder, same names)
+  {
+    const r = rig();
+    r.use(r.a); await r.a.clip._scan(); r.use(r.b); await r.b.clip._scan();
+    const alt = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-alt-'));
+    const f = path.join(alt, 'doc.txt'); fs.writeFileSync(f, 'hello');
+    const g = path.join(os.tmpdir(), 'clip-alt-' + process.pid); fs.mkdirSync(g, { recursive: true });
+    fs.writeFileSync(path.join(g, 'doc.txt'), 'hello');
+    r.b.board.nextOs = (bd) => { bd.buffers['text/uri-list'] = Buffer.from('file://' + path.join(g, 'doc.txt') + '\r\n'); };
+    r.now.t = 5000; r.use(r.a); copyFiles(f);
+    await r.pump();
+    assert.ok(r.total() <= 4, 'files: settles (' + r.total() + ' messages)');
+  }
+  // (d) formats appear a moment after the write
+  {
+    const r = rig();
+    r.use(r.a); await r.a.clip._scan(); r.use(r.b); await r.b.clip._scan();
+    r.b.board.nextOs = (bd) => { bd.formats = bd.formats.concat(['text/html', 'text/x-moz-url', 'UTF8_STRING']); };
+    r.now.t = 5000; r.use(r.a); copyText('plain');
+    await r.pump();
+    assert.ok(r.total() <= 4, 'formats: settles (' + r.total() + ' messages)');
+    assert.strictEqual(r.b.board.text, 'plain');
+  }
+  // Incoming content equal to what is there is not written again.
+  {
+    const s = setup();
+    await s.clip._scan();
+    copyText('same\r\ntext'); s.now.t = 1500; await s.clip._scan();
+    const w = board.writes.length;
+    s.now.t = 9000;
+    await s.deliver({ t: T.CLIP, text: 'same\ntext', ts: 8000, o: 'W' }); await settle();
+    assert.strictEqual(board.writes.length, w, 'equal content: the clipboard is not written');
+    assert.deepStrictEqual(s.clip.latest.cur && [s.clip.latest.cur.ts, s.clip.latest.cur.o], [8000, 'W'], 'but the newer stamp is adopted');
+    assert.strictEqual(s.clip.view.history[0].dir, 'in');
+  }
+  io.writeFiles = io0;
+
+  // Breaker: a runaway detector pauses; a person every few seconds never does.
+  {
+    const s = setup();
+    await s.clip._scan();
+    for (let i = 0; i < 20; i++) { s.now.t += 200; copyText('fast ' + i); await s.clip._scan(); }
+    assert.ok(s.sent(T.CLIP).length <= 8, 'runaway copies are cut off (' + s.sent(T.CLIP).length + ')');
+    assert.strictEqual(s.clip.view.paused, true);
+    assert.ok(s.clip.view.pausedUntil > s.now.t);
+    s.now.t += 31000; copyText('after'); await s.clip._scan();
+    assert.strictEqual(s.sent(T.CLIP).slice(-1)[0].text, 'after', 'works again after the pause');
+    const s2 = setup();
+    await s2.clip._scan();
+    for (let i = 0; i < 40; i++) { s2.now.t += 3000; copyText('person ' + i); await s2.clip._scan(); }
+    assert.strictEqual(s2.sent(T.CLIP).length, 40);
+    assert.strictEqual(s2.clip.view.paused, false);
   }
 
   console.log('linux/test/clip.js: all passed');
