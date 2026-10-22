@@ -11,7 +11,7 @@ const { EventEmitter } = require('events');
 // ---- fake electron: a pasteboard with a change count ----
 const pb = { count: 1, text: '', png: null, files: [] };
 const bump = (patch) => { Object.assign(pb, { text: '', png: null, files: [] }, patch); pb.count++; };
-const fakeImage = (png) => ({ isEmpty: () => !png, toPNG: () => png, getSize: () => ({ width: 2, height: 3 }) });
+const fakeImage = (png) => ({ isEmpty: () => !png, toPNG: () => png, getSize: () => ({ width: 2, height: 3 }), resize() { return this; }, toDataURL: () => 'data:image/png;base64,thumb' });
 const electron = {
   clipboard: {
     readText: async () => pb.text,
@@ -38,7 +38,7 @@ Date.now = () => now;
 const T = P.T;
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')]);
 
-function rig(over = {}) {
+function rig(over = {}, historyDir) {
   const settings = { macId: 'M', clipboard: { enabled: true, send: true, receive: true, mode: 'instant', skipConcealed: true, maxKB: 256, images: true, files: true, filesMaxMB: 50, historySize: 20, ...over } };
   const server = new EventEmitter();
   server.current = { name: 'PC', deviceId: 'W' };
@@ -52,7 +52,7 @@ function rig(over = {}) {
     if (cmd === 'clipboardFiles') { helper.wrote.push(args.paths); bump({ files: args.paths }); return { changeCount: pb.count }; }
     throw new Error(cmd);
   };
-  const clip = new Clipboard(server, helper, () => settings);
+  const clip = new Clipboard(server, helper, () => settings, { historyDir });
   clip.fileClip = { announced: [], announceClipboard: async (paths, stamp, mb) => clip.fileClip.announced.push({ paths, stamp, mb }), retractAuto() {} };
   // The helper's watcher: tell about the current pasteboard (what Pasteboard.swift emits after a change).
   const watch = async (initial = false) => {
@@ -244,6 +244,91 @@ const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise(
     r.server.emit(`t:${T.FCLIP_OFFER}`, { ...offer, id: 'f4', ts: 9100 });
     assert.strictEqual(drop.expected.length, 2);
     assert.strictEqual(fc.incoming.id, 'f3');
+  }
+
+  // Recent list: both directions, copy again as a new stamped copy, not-kept items, size 0, wipe at start.
+  {
+    now = 10000;
+    bump({});
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-hist-'));
+    const src = path.join(dir, 'src');
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'a.txt'), 'hello');
+    fs.mkdirSync(path.join(dir, 'h'));
+    fs.writeFileSync(path.join(dir, 'h', 'stale.bin'), 'x'); // an earlier run's leftovers
+    const hdir = path.join(dir, 'h');
+    const r = rig({}, hdir); // constructing the Clipboard wipes the folder
+    assert.ok(!fs.existsSync(hdir), 'wipe at start removes leftovers');
+    await r.watch(true);
+    // out: text, image, files
+    now = 10100; await r.copy({ text: 'out text' });
+    now = 10200; await r.copy({ png: PNG });
+    now = 10300; await r.copy({ files: [path.join(src, 'a.txt')] });
+    // in: text, image, files
+    now = 10400; r.server.emit(`t:${T.CLIP}`, { t: T.CLIP, text: 'in text', ts: 10400, o: 'W' }); await flush(r.clip);
+    const PNG3 = Buffer.concat([PNG, Buffer.from('3')]);
+    now = 10500; r.server.emit(`t:${T.CLIP_IMAGE}`, { t: T.CLIP_IMAGE, id: 'h1', w: 1, h: 1, png: PNG3.toString('base64'), ts: 10500, o: 'W' }); await flush(r.clip);
+    now = 10600;
+    const recv = path.join(dir, 'recv'); fs.mkdirSync(recv); fs.writeFileSync(path.join(recv, 'b.txt'), 'bb');
+    r.clip.latest.accept({ ts: 10600, o: 'W' }, 'files', 'ff');
+    await r.clip.applyFiles([path.join(recv, 'b.txt')], 'ff'); await flush(r.clip);
+    let rows = r.clip.view.history;
+    assert.deepStrictEqual(rows.map((h) => h.dir + ':' + h.kind), ['in:files', 'in:image', 'in:text', 'out:files', 'out:image', 'out:text']);
+    assert.ok(rows.every((h) => h.kept));
+    assert.strictEqual(rows[1].thumb, 'data:image/png;base64,thumb');
+    assert.strictEqual(rows[0].title, 'b.txt');
+    // copy again: image from the list (out:image) goes back, is a new copy and is sent
+    const imgRow = rows.find((h) => h.dir === 'out' && h.kind === 'image');
+    const sentBefore = r.sentOf(T.CLIP_IMAGE).length;
+    now = 11000;
+    await r.clip.copyHistory(imgRow.id); await flush(r.clip);
+    assert.ok(pb.png.equals(PNG), 'the image is back on the clipboard');
+    const sent = r.sentOf(T.CLIP_IMAGE);
+    assert.strictEqual(sent.length, sentBefore + 1);
+    assert.deepStrictEqual([sent[sent.length - 1].o, sent[sent.length - 1].ts], ['M', 11000]);
+    await r.watch(); await flush(r.clip);
+    assert.strictEqual(r.sentOf(T.CLIP_IMAGE).length, sentBefore + 1, 'no echo / second stamp');
+    // text and files too
+    const txtRow = rows.find((h) => h.dir === 'in' && h.kind === 'text');
+    now = 11100;
+    await r.clip.copyHistory(txtRow.id); await flush(r.clip);
+    assert.strictEqual(pb.text, 'in text');
+    assert.strictEqual(r.sentOf(T.CLIP).slice(-1)[0].text, 'in text');
+    const fileRow = r.clip.view.history.find((h) => h.dir === 'out' && h.kind === 'files');
+    now = 11200;
+    const annBefore = r.clip.fileClip.announced.length;
+    await r.clip.copyHistory(fileRow.id); await flush(r.clip);
+    assert.strictEqual(r.clip.fileClip.announced.length, annBefore + 1);
+    const an = r.clip.fileClip.announced.slice(-1)[0];
+    assert.ok(an.paths[0].startsWith(hdir) && an.stamp.ts === 11200 && fs.readFileSync(an.paths[0], 'utf8') === 'hello', 'files from the kept copy, stamped now');
+    assert.deepStrictEqual(pb.files, an.paths);
+    // preview of every kind
+    assert.ok(r.clip.previewHistory(imgRow.id).image.startsWith('data:image/png;base64,'));
+    assert.strictEqual(r.clip.previewHistory(txtRow.id).text, 'in text');
+    assert.strictEqual(r.clip.previewHistory(fileRow.id).files[0].name, 'a.txt');
+    // an item that is not kept cannot be copied
+    const id = r.clip.hist.add({ kind: 'image', dir: 'out', png: Buffer.alloc(300 * 1024 * 1024 / 4 + 10), w: 9, h: 9 });
+    assert.ok(id && !r.clip.hist.content(id));
+    const before = pb.count;
+    await r.clip.copyHistory(id); await flush(r.clip);
+    assert.strictEqual(pb.count, before, 'a not-kept item does not touch the clipboard');
+    assert.strictEqual(r.clip.view.history.find((h) => h.id === id).kept, false);
+    // Clear and quit wipe the folder
+    r.clip.clearHistory();
+    assert.strictEqual(r.clip.view.history.length, 0);
+    assert.ok(!fs.existsSync(hdir) || fs.readdirSync(hdir).length === 0);
+    now = 11300; await r.copy({ png: PNG3 });
+    assert.ok(fs.existsSync(hdir) && fs.readdirSync(hdir).length === 1);
+    r.clip.shutdown();
+    assert.ok(!fs.existsSync(hdir), 'quit wipes the folder');
+    // historySize 0 keeps nothing, nothing on disk
+    const z = rig({ historySize: 0 }, path.join(dir, 'zero'));
+    await z.watch(true);
+    now = 11400; await z.copy({ png: PNG }); await z.copy({ text: 'zero' });
+    z.server.emit(`t:${T.CLIP}`, { t: T.CLIP, text: 'in zero', ts: 11500, o: 'W' }); await flush(z.clip);
+    assert.strictEqual(z.clip.view.history.length, 0);
+    assert.ok(!fs.existsSync(path.join(dir, 'zero')));
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 
   // Cache cleanup: older than an hour goes, the newest few stay.

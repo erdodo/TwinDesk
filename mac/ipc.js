@@ -472,8 +472,8 @@ function setupIpc(ctx) {
       setGroup('clipboard', partial);
       ctx.clipboard.applySettings();
     },
-    copyHistory(index) {
-      ctx.clipboard.copyHistory(Number(index));
+    copyHistory(id) {
+      ctx.clipboard.copyHistory(String(id));
     },
     clearHistory() {
       ctx.clipboard.clearHistory();
@@ -506,6 +506,7 @@ function setupIpc(ctx) {
 
   ipcMain.handle('getState', () => ctx.state);
   ipcMain.handle('phoneAssets', () => ctx.phone.assetsView());
+  ipcMain.handle('previewHistory', (_e, id) => ctx.clipboard.previewHistory(String(id))); // the whole Recent item
   for (const [name, fn] of Object.entries(actions)) ipcMain.on(name, (_e, arg) => fn(arg));
   return actions;
 }
