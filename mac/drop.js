@@ -144,9 +144,10 @@ class Drop extends EventEmitter {
     this.emit('change');
   }
 
-  // This Mac pressed paste: files of that batch go to `dir`.
-  expectBatch(batch, dir) {
-    this.expected.set(batch, dir);
+  // This Mac pressed paste: files of that batch go to `dir`. quiet: the clipboard sharing asked for
+  // them (cache folder): no Finder reveal, not listed under Recent.
+  expectBatch(batch, dir, quiet = false) {
+    this.expected.set(batch, { dir, quiet });
     setTimeout(() => this.expected.delete(batch), 10 * 60 * 1000);
   }
 
@@ -161,7 +162,7 @@ class Drop extends EventEmitter {
       const pasted = this.expected.get(m.batch);
       if (m.drop === 'paste' && !pasted) return refuse('not_allowed'); // we never asked for it
       if (m.drop === 'send' && !this.cfg.acceptDrops) return refuse('not_allowed');
-      b = { kind: m.drop, dir: pasted || this.cfg.folder || DOWNLOADS, count, done: 0, ok: 0, tops: new Map(), placed: [] };
+      b = { kind: m.drop, dir: (pasted && pasted.dir) || this.cfg.folder || DOWNLOADS, quiet: !!(pasted && pasted.quiet), count, done: 0, ok: 0, tops: new Map(), placed: [] };
       this.batches.set(m.batch, b);
       this.expected.delete(m.batch);
     }
@@ -199,9 +200,11 @@ class Drop extends EventEmitter {
     const where = b.dir.replace(os.homedir(), '~');
     this.server.sendToClient({ t: P.T.FILES_DONE, batch, ok: b.ok === b.count, where, files: b.ok });
     const name = b.placed.length === 1 ? path.basename(b.placed[0]) : `${b.placed.length} items`;
-    this._remember({ name, size: 0, path: b.placed[0] || null, ok: b.ok > 0, ...(b.ok === b.count ? {} : { error: `${b.count - b.ok} of ${b.count} failed` }) });
-    if (b.ok && (this.cfg.reveal || b.kind === 'paste')) shell.showItemInFolder(b.placed[0]);
-    this.emit('batch', { kind: b.kind, files: b.ok, count: b.count, ok: b.ok === b.count });
+    if (!b.quiet) {
+      this._remember({ name, size: 0, path: b.placed[0] || null, ok: b.ok > 0, ...(b.ok === b.count ? {} : { error: `${b.count - b.ok} of ${b.count} failed` }) });
+      if (b.ok && (this.cfg.reveal || b.kind === 'paste')) shell.showItemInFolder(b.placed[0]);
+    }
+    this.emit('batch', { batch, kind: b.kind, quiet: b.quiet, placed: b.placed.slice(), files: b.ok, count: b.count, ok: b.ok === b.count });
   }
 
   // A file of a native drag (dragin.js): streamed into the drag's temp tree.
