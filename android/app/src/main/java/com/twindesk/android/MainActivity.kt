@@ -234,13 +234,13 @@ fun App(core: Core, resumed: Int) {
         if (wide) {
             Row(Modifier.safeDrawingPadding()) {
                 Sidebar(core, v, tab) { tab = it }
-                Page(core, v, tab, Modifier.weight(1f))
+                Page(core, v + resumed, tab, Modifier.weight(1f))
             }
         } else {
             Column(Modifier.safeDrawingPadding()) {
                 TopIdentity(core, v)
                 if (more) MoreList(core, v, Modifier.weight(1f)) { tab = it; more = false }
-                else Page(core, v, tab, Modifier.weight(1f))
+                else Page(core, v + resumed, tab, Modifier.weight(1f))
                 NavigationBar(containerColor = pal.card) {
                     val item = @Composable { label: String, icon: ImageVector, colors: List<Color>, selected: Boolean, go: () -> Unit ->
                         NavigationBarItem(
@@ -340,7 +340,7 @@ private fun Page(core: Core, v: Int, tab: Tab, modifier: Modifier) {
                 Tab.Screen -> ScreenPage(core, v)
                 Tab.Cursor -> CursorPage(core, v)
                 Tab.Keyboard -> KeyboardPage(core, v)
-                Tab.Clipboard -> ClipboardPage(core, v + resumed) // (+ resumed: Display over other apps may have changed in Settings)
+                Tab.Clipboard -> ClipboardPage(core, v)
                 Tab.Notifications -> NotificationsPage(core, v)
                 Tab.Files -> FilesPage(core, v)
                 Tab.Sound -> SoundPage(core, v)
