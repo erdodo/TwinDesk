@@ -174,7 +174,7 @@ function start() {
     discovery.wantProbes = link.snapshot().link.state !== 'connected'; // probe every 10 s only while not connected
     pushState();
   });
-  clip = new Clip(link, () => settings.clipboard, pushState);
+  clip = new Clip(link, () => settings.clipboard, pushState, device.id);
   screen = new Screen({
     link,
     clip,
@@ -219,10 +219,12 @@ function start() {
   vdd = new Vdd({ helper, onChange: pushState });
   // Notifications both ways, Send files, copy/paste files with shortcuts
   notifs = new Notifs({ link, helper, settings, save: saveSettings, selfIds: [AUMID, 'org.macshare.windows'], peerName, onChange: pushState });
-  fileClip = new FileClip({ link, helper, fileDrop, fileRecv, dragRecv, settings, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
+  fileClip = new FileClip({ link, helper, clip, fileDrop, fileRecv, dragRecv, settings, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
   // A paste Windows copies itself (dragrecv.js) — its files skip filerecv.js.
   fileRecv.claims = (m) => dragRecv._pasteOf(m);
   dragRecv.onPasted = (b) => fileClip.pasted(b);
+  clip.attachFiles({ helper, fileClip, cacheDir: path.join(app.getPath('userData'), 'clipfiles') });
+  clip.start(); // every copy is stamped from here on (clipsync.js)
   kvm.fileClip = fileClip; // Our copy/paste shortcut while driving → fclip.key
   sendTo = new SendTo({ link, fileDrop, peerName: () => (peerView() || {}).name || '', popup: (kind, text, sub) => hud.show(kind, text, sub) });
   // Copy/paste and Send files show progress in the popup, like a drag. Receiving: every
@@ -270,6 +272,7 @@ function start() {
   });
   fileRecv.onBatch = (b) => {
     liveDone('recv', b.files ? 'Received ' + plural(b.files, 'file') : 'Nothing arrived', b.files ? 'From ' + peerName() : '');
+    if (clip.filesArrived(b)) return; // fetched by the clipboard: it puts them on the clipboard
     if (b.kind === 'paste') fileClip.pasted(b);
     else if (b.files) hud.show('driven', 'Received ' + b.files + ' file' + (b.files === 1 ? '' : 's') + ' from ' + peerName());
   };

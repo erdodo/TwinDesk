@@ -134,9 +134,10 @@ class FileRecv {
   // ---- Send files / paste batches ----
 
   // This PC pressed paste: the files of that batch go to `dir`. bytes: the batch's size from
-  // fclip.offer, for the progress popup.
-  expectBatch(batch, dir, bytes = 0) {
-    this.expected.set(batch, { dir, bytes });
+  // fclip.offer, for the progress popup. quiet: fetched by the clipboard (clip.js), so the folder
+  // isn't shown in Explorer afterwards.
+  expectBatch(batch, dir, bytes = 0, quiet = false) {
+    this.expected.set(batch, { dir, bytes, quiet });
     setTimeout(() => this.expected.delete(batch), 10 * 60 * 1000);
   }
 
@@ -154,7 +155,7 @@ class FileRecv {
       if (m.drop === 'send' && !this.settings.files.acceptFromMac) return refuse('not_allowed');
       // total: the whole batch's bytes (file.offer `bytes`, or what fclip.offer said); 0 = unknown.
       const total = Number(m.bytes) > 0 ? Number(m.bytes) : pasted ? pasted.bytes : 0;
-      b = { kind: m.drop, dir: pasted ? pasted.dir : app.getPath('downloads'), count, done: 0, ok: 0, tops: new Map(), placed: [], total, got: 0, at: Date.now() };
+      b = { kind: m.drop, dir: pasted ? pasted.dir : app.getPath('downloads'), count, done: 0, ok: 0, tops: new Map(), placed: [], total, got: 0, at: Date.now(), quiet: !!(pasted && pasted.quiet) };
       this.batches.set(m.batch, b);
       this.expected.delete(m.batch);
     }
@@ -216,10 +217,11 @@ class FileRecv {
     const name = b.placed.length === 1 ? path.basename(b.placed[0]) : b.placed.length + ' items';
     this.last = { name, ok: b.ok > 0, text: b.ok === b.count ? 'Saved to ' + b.dir : (b.count - b.ok) + ' of ' + b.count + ' failed', at: Date.now() };
     if (b.ok) {
-      if (b.kind === 'paste') this.helper.request('selectItems', { dir: b.dir, names: b.placed.map((p) => path.basename(p)) }).catch(() => {});
+      if (b.quiet) { /* the clipboard puts them on the clipboard */ }
+      else if (b.kind === 'paste') this.helper.request('selectItems', { dir: b.dir, names: b.placed.map((p) => path.basename(p)) }).catch(() => {});
       else spawn('explorer.exe', ['/select,', b.placed[0]], { detached: true, stdio: 'ignore' }).unref();
     }
-    if (this.onBatch) this.onBatch({ kind: b.kind, files: b.ok, count: b.count, ok: b.ok === b.count });
+    if (this.onBatch) this.onBatch({ kind: b.kind, batch, files: b.ok, count: b.count, ok: b.ok === b.count, quiet: b.quiet, placed: b.placed });
     this.onChange();
   }
 
