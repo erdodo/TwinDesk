@@ -9,15 +9,16 @@ const path = require('path');
 const { EventEmitter } = require('events');
 
 // ---- fake electron: a pasteboard with a change count ----
-const pb = { count: 1, text: '', png: null, files: [] };
+let pb = { count: 1, text: '', png: null, files: [] };
+let osMode = ''; // how the fake OS touches the clipboard after our own write: crlf | reencode | formats | rewrite
 const bump = (patch) => { Object.assign(pb, { text: '', png: null, files: [] }, patch); pb.count++; };
-const fakeImage = (png) => ({ isEmpty: () => !png, toPNG: () => png, getSize: () => ({ width: 2, height: 3 }), resize() { return this; }, toDataURL: () => 'data:image/png;base64,thumb' });
+const fakeImage = (png) => ({ isEmpty: () => !png, toPNG: () => png, toBitmap: () => { const i = png.indexOf('#'); return png.subarray(0, i < 0 ? png.length : i); }, getSize: () => ({ width: 2, height: 3 }), resize() { return this; }, toDataURL: () => 'data:image/png;base64,thumb' });
 const electron = {
   clipboard: {
     readText: async () => pb.text,
-    writeText: (t) => bump({ text: t }),
+    writeText: (t) => { bump({ text: t }); pb.touch = () => { if (osMode === 'crlf') { pb.text = t.replace(/\n/g, '\r\n'); pb.count++; } }; },
     readImage: () => fakeImage(pb.png),
-    writeImage: (img) => bump({ png: img.toPNG() }),
+    writeImage: (img) => { const png = img.toPNG(); bump({ png }); pb.touch = () => { if (osMode === 'reencode') pb.png = Buffer.concat([png, Buffer.from('#re')]); if (osMode === 'formats') pb.text = 'copied.png'; pb.count++; }; },
   },
   nativeImage: { createFromBuffer: (b) => fakeImage(b) },
   globalShortcut: { unregisterAll() {}, register: () => true },
@@ -49,7 +50,16 @@ function rig(over = {}, historyDir) {
   helper.wrote = [];
   helper.request = async (cmd, args) => {
     if (cmd === 'clipboardInfo') return { changeCount: pb.count, concealed: false, text: !!pb.text, image: !!pb.png, ...(pb.files.length ? { files: pb.files } : {}) };
-    if (cmd === 'clipboardFiles') { helper.wrote.push(args.paths); bump({ files: args.paths }); return { changeCount: pb.count }; }
+    if (cmd === 'clipboardFiles') {
+      helper.wrote.push(args.paths);
+      bump({ files: args.paths });
+      pb.touch = () => { // the list is rewritten: same names, other paths (and a text format appears)
+        if (osMode === 'rewrite') pb.files = args.paths.map((f) => { const d = path.join(path.dirname(f), 'again'); fs.mkdirSync(d, { recursive: true }); fs.copyFileSync(f, path.join(d, path.basename(f))); return path.join(d, path.basename(f)); });
+        if (osMode === 'formats') pb.text = 'names';
+        pb.count++;
+      };
+      return { changeCount: pb.count };
+    }
     throw new Error(cmd);
   };
   const clip = new Clipboard(server, helper, () => settings, { historyDir });
@@ -317,7 +327,7 @@ const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise(
     r.clip.clearHistory();
     assert.strictEqual(r.clip.view.history.length, 0);
     assert.ok(!fs.existsSync(hdir) || fs.readdirSync(hdir).length === 0);
-    now = 11300; await r.copy({ png: PNG3 });
+    now = 11300; await r.copy({ png: Buffer.concat([PNG, Buffer.from('4')]) });
     assert.ok(fs.existsSync(hdir) && fs.readdirSync(hdir).length === 1);
     r.clip.shutdown();
     assert.ok(!fs.existsSync(hdir), 'quit wipes the folder');
@@ -329,6 +339,89 @@ const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise(
     assert.strictEqual(z.clip.view.history.length, 0);
     assert.ok(!fs.existsSync(path.join(dir, 'zero')));
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // The loop: two fake devices, the OS touches the clipboard after each write (CRLF, re-encoded image,
+  // rewritten file list, formats appearing). The copy on A must settle: each side applies it once.
+  {
+    const mkdev = (id, base) => {
+      pb = { count: 1, text: '', png: null, files: [] }; // each device has its own pasteboard
+      const r = rig({ mode: 'instant' });
+      r.settings.macId = id;
+      r.clip.latest = new (require('../../shared/clipsync.js').Latest)({ selfId: id });
+      const d = { r, pb, sentIdx: 0, annIdx: 0, base };
+      d.pb = pb; // the pasteboard this rig was created against
+      return d;
+    };
+    const use = (d) => { pb = d.pb; };
+    const settle = async (A, B) => {
+      let msgs = 0;
+      const pair = [[A, B], [B, A]];
+      for (let round = 0; round < 12; round++) {
+        let moved = false;
+        for (const [d, o] of pair) {
+          use(d);
+          if (pb.touch) { const t = pb.touch; pb.touch = null; t(); await d.r.watch(); moved = true; }
+          while (d.sentIdx < d.r.server.sent.length) {
+            const m = d.r.server.sent[d.sentIdx++];
+            if (m.t !== T.CLIP && m.t !== T.CLIP_IMAGE) continue;
+            msgs++; moved = true; use(o);
+            o.r.server.emit(`t:${m.t}`, m); await flush(o.r.clip);
+          }
+          while (d.annIdx < d.r.clip.fileClip.announced.length) {
+            const an = d.r.clip.fileClip.announced[d.annIdx++];
+            msgs++; moved = true; use(o);
+            const dir = path.join(o.base, 'recv' + d.annIdx); fs.mkdirSync(dir, { recursive: true });
+            const placed = an.paths.map((f) => { fs.copyFileSync(f, path.join(dir, path.basename(f))); return path.join(dir, path.basename(f)); });
+            o.r.clip.latest.accept({ ts: an.stamp.ts, o: an.stamp.o }, 'files', 'ff' + d.annIdx);
+            await o.r.clip.applyFiles(placed, 'ff' + d.annIdx); await flush(o.r.clip);
+          }
+        }
+        if (!moved) break;
+        now += 50;
+      }
+      return msgs;
+    };
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-loop-'));
+    for (const [mode, doCopy, check] of [
+      ['crlf', (d) => d.r.copy({ text: 'line one\nline two' }), (d) => d.pb.text.replace(/\r\n/g, '\n') === 'line one\nline two'],
+      ['reencode', (d) => d.r.copy({ png: PNG }), (d) => d.pb.png.subarray(0, PNG.length).equals(PNG)],
+      ['formats', (d) => d.r.copy({ png: PNG }), (d) => d.pb.png.subarray(0, PNG.length).equals(PNG)],
+      ['rewrite', (d) => { fs.mkdirSync(d.base, { recursive: true }); fs.writeFileSync(path.join(d.base, 'doc.txt'), 'hello'); return d.r.copy({ files: [path.join(d.base, 'doc.txt')] }); }, (d) => d.pb.files.length === 1],
+      ['formats', (d) => { fs.mkdirSync(d.base, { recursive: true }); fs.writeFileSync(path.join(d.base, 'doc.txt'), 'hello'); return d.r.copy({ files: [path.join(d.base, 'doc.txt')] }); }, (d) => d.pb.files.length === 1],
+    ]) {
+      osMode = mode;
+      now += 100000;
+      const A = mkdev('A', path.join(base, mode + 'A' + now));
+      const B = mkdev('B', path.join(base, mode + 'B' + now));
+      use(A); await A.r.watch(true); use(B); await B.r.watch(true);
+      use(A); now += 10; await doCopy(A);
+      const msgs = await settle(A, B);
+      assert.ok(msgs >= 1 && msgs <= 4, `${mode}: settled with ${msgs} messages`);
+      assert.strictEqual(msgs, 1, `${mode}: B applied it once and sent nothing back`);
+      assert.ok(check(B), `${mode}: B holds the content`);
+      assert.ok(!A.r.clip.view.paused && !B.r.clip.view.paused);
+    }
+    osMode = '';
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+
+  // Breaker: a runaway detector is paused (and says so); a person copying every few seconds never is.
+  {
+    bump({});
+    now = 500000;
+    const r = rig({ mode: 'instant' });
+    await r.watch(true);
+    for (let i = 0; i < 30; i++) { now += 100; await r.copy({ text: 'runaway ' + i }); }
+    assert.ok(r.sentOf(T.CLIP).length <= 8, `a runaway sends at most 8 (${r.sentOf(T.CLIP).length})`);
+    assert.ok(r.clip.view.paused && r.clip.view.pausedUntil > now);
+    now += 31000;
+    await r.copy({ text: 'after the pause' });
+    assert.strictEqual(r.sentOf(T.CLIP).slice(-1)[0].text, 'after the pause');
+    assert.ok(!r.clip.view.paused);
+    const n = r.sentOf(T.CLIP).length;
+    for (let i = 0; i < 40; i++) { now += 3000; await r.copy({ text: 'person ' + i }); }
+    assert.strictEqual(r.sentOf(T.CLIP).length, n + 40, 'a person is never blocked');
   }
 
   // Cache cleanup: older than an hour goes, the newest few stay.
