@@ -67,9 +67,11 @@ async function winDevice(net, id, cfg) {
   dev.board = winBoard();
   dev.settings = cfg || settings();
   dev.clip = new Clip({ bus: dev.bus, mesh: dev.mesh, getSettings: () => dev.settings, onChange: () => {}, clipboard: dev.board, nativeImage });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'clip-mesh-win-'));
+  dev.clip.attachFiles({ helper: null, fileClip: null, cacheDir: path.join(tmp, 'clipfiles'), historyDir: path.join(tmp, 'cliphistory') });
   made.push(dev.clip);
   await dev.clip.tick(); // the first look: what is on the clipboard at start is not a copy
-  dev.copyText = async (text) => { dev.board.text = text; dev.board.image = null; await dev.clip.tick(); };
+  dev.copyText = async (text) => { dev.board.text = text; dev.board.image = null; dev.board.files = null; dev.board.buffers = {}; await dev.clip.tick(); };
   dev.copyImage = async (buf) => { dev.board.image = buf; dev.board.text = ''; await dev.clip.tick(); };
   return dev;
 }
@@ -90,7 +92,7 @@ async function macDevice(net, id, cfg) {
   dev.helper.running = true;
   dev.helper.send = () => {};
   dev.helper.request = async (cmd) => (cmd === 'clipboardInfo' ? { changeCount: dev.count, concealed: false, text: !!b.text, image: !!b.png } : {});
-  dev.clip = new MacClip({ bus: dev.bus, mesh: dev.mesh, getSettings: () => ({ clipboard: dev.settings }), helper: dev.helper, clipboard: b, nativeImage });
+  dev.clip = new MacClip({ historyDir: fs.mkdtempSync(path.join(os.tmpdir(), 'clip-mesh-mac-')), bus: dev.bus, mesh: dev.mesh, getSettings: () => ({ clipboard: dev.settings }), helper: dev.helper, clipboard: b, nativeImage });
   const copied = async (ev) => { dev.count += 1; dev.helper.emit('event', 'clipboard', { changeCount: dev.count, concealed: false, ...ev }); await dev.clip.chain; };
   dev.copyText = async (text) => { b.text = text; b.png = null; await copied({ text: true }); };
   dev.copyImage = async (buf) => { b.png = buf; b.text = ''; await copied({ image: true }); };
@@ -222,6 +224,44 @@ scenario('an image goes through the pool: applied everywhere, relayed unchanged,
   assert.notStrictEqual(P.board.image && P.board.image.toString('hex'), png(8).toString('hex'));
 });
 
+scenario('Recent list: an image received through the pool is listed and copied again as the newest copy', async () => {
+  const { net, W, M, P } = await world('line');
+  await W.copyImage(png(4));
+  await net.run();
+  for (const d of [M, P]) {
+    const row = d.clip.view.history.find((r) => r.kind === 'image' && r.dir === 'in');
+    assert.ok(row && row.kept, d.id + ' lists the received image');
+    assert.strictEqual(row.from, d.id === 'M' ? 'PC-W' : 'Mac-M', 'named by the device that copied it, else by the one that relayed it');
+    assert.ok(d.clip.previewHistory(row.id).image.startsWith('data:image/png;base64,'));
+  }
+  assert.ok(W.clip.view.history.some((r) => r.kind === 'image' && r.dir === 'out'), 'W lists what it sent');
+  const t0 = net.sent('clip.image', 'W', 'M')[0].msg.ts;
+  // Another text is copied meanwhile, then P copies the image again from its list.
+  await later();
+  await W.copyText('typed on W');
+  await net.run();
+  assert.strictEqual(P.board.text, 'typed on W');
+  await later();
+  const row = P.clip.view.history.find((r) => r.kind === 'image');
+  assert.strictEqual(await P.clip.copyHistory(row.id), true);
+  await net.run();
+  const again = net.sent('clip.image', 'P', 'M')[0].msg;
+  assert.deepStrictEqual([again.o, again.ts > t0], ['P', true], 'stamped now, as P\'s copy');
+  for (const d of [W, M, P]) assert.ok((d.board.image || d.board.png).equals(png(4)), d.id + ' has the image again');
+  assert.strictEqual(W.board.text, '');
+  // The same from the Mac's list: a text received through the pool is copied again and wins.
+  await later();
+  const trow = M.clip.view.history.find((r) => r.kind === 'text' && r.dir === 'in');
+  assert.ok(trow);
+  await M.clip.copyHistory(trow.id);
+  await net.run();
+  for (const d of [W, M, P]) assert.strictEqual(d.board.text, 'typed on W', d.id);
+  assert.strictEqual(net.sent('clip', 'M').length >= 1, true, 'M published the copy again');
+  // Clear removes the kept data.
+  P.clip.clearHistory();
+  assert.deepStrictEqual(P.clip.view.history, []);
+});
+
 scenario('files: the offer goes to every device that takes files; the selected one fetches from the announcer', async () => {
   const { net, W, M, P } = await world('full');
   // W and P run the real FileClip (windows/fclip.js) over their buses; M is a Mac with no FileClip here.
@@ -267,12 +307,23 @@ scenario('files: the offer goes to every device that takes files; the selected o
 
   // The files land at P: they become its clipboard, and nobody announces them again.
   const got = path.join(P.rec.expect[0][1], 'a.txt');
+  fs.writeFileSync(got, 'hello');
   assert.strictEqual(P.clip.filesArrived({ quiet: true, batch: o.id, ok: true, placed: [got] }), true);
   await P.clip.queue;
   assert.deepStrictEqual(P.rec.drop, [[got]]);
   await P.clip.tick();
   await net.run();
   assert.strictEqual(net.sent('fclip.offer', 'P').length, 0, 'received files are not announced');
+
+  // The files P received are in its Recent list; copying them again announces them as the newest copy.
+  const frow = P.clip.view.history.find((r) => r.kind === 'files' && r.dir === 'in');
+  assert.ok(frow && frow.kept, 'received files are listed and kept');
+  await later();
+  net.log.length = 0;
+  assert.strictEqual(await P.clip.copyHistory(frow.id), true);
+  await net.run();
+  assert.deepStrictEqual(net.sent('fclip.offer', 'P').map((e) => e.to).sort(), ['M', 'W'], 'announced to the others');
+  assert.ok(net.sent('fclip.offer', 'P')[0].msg.ts > o.ts, 'as the newest copy');
 
   // P copies text later; W's late re-offer of the older files is ignored at P (no second fetch).
   await later();
