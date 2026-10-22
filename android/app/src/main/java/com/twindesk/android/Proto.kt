@@ -44,6 +44,9 @@ object Proto {
         const val BYE = "bye" // Disconnect on purpose: the computer doesn't wait for us to come back
         const val CLIP = "clip"
         const val CLIP_POLICY = "clip.policy"
+        const val CLIP_REQUEST = "clip.request"
+        const val CLIP_IMAGE = "clip.image" // {id, ts, o, w, h, png: base64}
+        const val CLIP_LATEST = "clip.latest" // after welcome {ts, o, kind}: the newest copy this side holds
         const val NOTIF = "notif"
         const val NOTIF_POLICY = "notif.policy"
         const val FILE_OFFER = "file.offer"
