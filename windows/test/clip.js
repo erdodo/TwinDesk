@@ -31,6 +31,7 @@ const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (req, ...rest) { return req === 'electron' ? 'electron' : origResolve.call(this, req, ...rest); };
 
 const Clip = require('../clip.js');
+const { Mesh } = require('../../shared/mesh.js');
 const S = require('../../shared/clipsync.js');
 const P = require('../../shared/protocol.js');
 
@@ -41,21 +42,34 @@ const settings = (o) => ({ enabled: true, send: true, receive: true, mode: 'inst
 
 function make(cfg, id = 'win') {
   const handlers = {};
+  const peerHandlers = {};
   const sent = [];
-  const link = { status: { state: 'connected' }, on: (t, f) => { handlers[t] = f; }, send: (m) => { sent.push(m); return true; } };
+  const send = (m) => { sent.push(m); return true; };
+  // One old one-to-one peer ('mac': it sends no pool stamps, only the time of its copies).
+  const mesh = new Mesh({ selfId: id });
+  mesh.addPeer({ id: 'mac', name: 'Mac', os: 'mac', mesh: false, send });
+  const bus = {
+    on: (t, f) => { (handlers[t] = handlers[t] || []).push(f); },
+    onPeer: (e, f) => { (peerHandlers[e] = peerHandlers[e] || []).push(f); },
+    send: (to, m) => send(m),
+    selectedId: () => 'mac',
+    connectedIds: () => ['mac'],
+  };
   const calls = { announce: [], expect: [], drop: [] };
-  const clip = new Clip(link, () => cfg, () => {}, id);
+  const clip = new Clip({ bus, mesh, getSettings: () => cfg, onChange: () => {} });
   clip.latest = new S.Latest({ selfId: id, clock: clock() });
   clip.attachFiles({
     helper: { clipFiles: async () => state.files || [], setFileDrop: async (paths) => { calls.drop.push(paths); state.files = paths; state.buffers = { FileNameW: Buffer.from(paths.join('|')) }; state.text = ''; } },
     fileClip: {
       fileRecv: { expectBatch: (...a) => calls.expect.push(a) },
-      announce: (paths, stamp, fid, mb, fromClip) => { calls.announce.push({ paths, stamp, fid, mb, fromClip }); return { bytes: 1 }; },
+      announce: (paths, stamp, fid, mb, fromClip, to) => { calls.announce.push({ paths, stamp, fid, mb, fromClip, to }); return { bytes: 1 }; },
       notice: () => {},
     },
     cacheDir: fs.mkdtempSync(path.join(os.tmpdir(), 'clip-test-')),
   });
-  return { clip, link, sent, handlers, calls, deliver: (m) => handlers[m.t](m) };
+  const deliver = (m) => { for (const f of handlers[m.t] || []) f(m, 'mac'); };
+  const welcome = () => { for (const f of peerHandlers.welcome || []) f('mac', {}); };
+  return { clip, sent, handlers, calls, deliver, welcome, mesh };
 }
 const reset = () => { state.text = ''; state.image = null; state.buffers = {}; state.files = null; now += 10000; };
 const wait = () => new Promise((r) => setImmediate(r));
@@ -141,7 +155,7 @@ async function test(name, fn) {
     state.text = 'x'; now += 1000;
     await w.clip.tick();
     w.sent.length = 0;
-    w.handlers.welcome({});
+    w.welcome();
     const lm = w.sent.find((m) => m.t === 'clip.latest');
     assert.ok(lm && lm.ts === w.clip.item.stamp.ts && lm.kind === 'text');
     w.sent.length = 0;
@@ -151,7 +165,7 @@ async function test(name, fn) {
     assert.strictEqual(w.sent.filter((m) => m.t === 'clip.request').length, 1);
     // after a new session the unsent-looking copy is offered again when the peer asks
     w.sent.length = 0;
-    w.handlers.welcome({});
+    w.welcome();
     w.deliver({ t: 'clip.request' });
     await settle(w.clip);
     assert.strictEqual(w.sent.filter((m) => m.t === 'clip').length, 1);

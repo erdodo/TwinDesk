@@ -30,6 +30,7 @@ Module._load = function (request, ...rest) {
 };
 
 const P = require('../../shared/protocol.js');
+const { Mesh } = require('../../shared/mesh.js');
 const { Clipboard } = require('../clipboard.js');
 const { FileClip, pruneCache } = require('../fclip.js');
 
@@ -40,10 +41,20 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 
 function rig(over = {}) {
   const settings = { macId: 'M', clipboard: { enabled: true, send: true, receive: true, mode: 'instant', skipConcealed: true, maxKB: 256, images: true, files: true, filesMaxMB: 50, historySize: 20, ...over } };
+  // The PC 'W' is one old one-to-one peer of the mesh (it sends no pool stamps, only the time of its copies).
   const server = new EventEmitter();
   server.current = { name: 'PC', deviceId: 'W' };
   server.sent = [];
   server.sendToClient = (m) => server.sent.push(m);
+  const mesh = new Mesh({ selfId: 'M' });
+  mesh.addPeer({ id: 'W', name: 'PC', os: 'win', mesh: false, send: (m) => { server.sent.push(m); return true; } });
+  const bus = {
+    on: (type, fn) => server.on(`t:${type}`, (m) => fn(m, 'W')),
+    onPeer: (ev, fn) => server.on(ev === 'welcome' ? 'client' : ev, () => fn('W', {})),
+    send: (to, m) => { server.sent.push(m); return true; },
+    selectedId: () => 'W',
+    connectedIds: () => (server.current ? ['W'] : []),
+  };
   const helper = new EventEmitter();
   helper.send = () => {};
   helper.wrote = [];
@@ -52,8 +63,8 @@ function rig(over = {}) {
     if (cmd === 'clipboardFiles') { helper.wrote.push(args.paths); bump({ files: args.paths }); return { changeCount: pb.count }; }
     throw new Error(cmd);
   };
-  const clip = new Clipboard(server, helper, () => settings);
-  clip.fileClip = { announced: [], announceClipboard: async (paths, stamp, mb) => clip.fileClip.announced.push({ paths, stamp, mb }), retractAuto() {} };
+  const clip = new Clipboard({ bus, mesh, helper, getSettings: () => settings });
+  clip.fileClip = { announced: [], announceClipboard: async (paths, stamp, mb, to) => clip.fileClip.announced.push({ paths, stamp, mb, to }), retractAuto() {} };
   // The helper's watcher: tell about the current pasteboard (what Pasteboard.swift emits after a change).
   const watch = async (initial = false) => {
     const i = await helper.request('clipboardInfo');
@@ -62,7 +73,7 @@ function rig(over = {}) {
   };
   const copy = async (patch) => { bump(patch); await watch(); };
   const sentOf = (t) => server.sent.filter((m) => m.t === t);
-  return { clip, server, helper, settings, watch, copy, sentOf };
+  return { clip, server, bus, mesh, helper, settings, watch, copy, sentOf };
 }
 const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise((r) => setImmediate(r)); await clip.chain; } };
 
@@ -194,7 +205,7 @@ const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise(
     await r.copy({ files: ['/Users/x/a.txt', '/Users/x/b.txt'], text: 'a.txt' });
     const [an] = r.clip.fileClip.announced;
     assert.deepStrictEqual(an.paths, ['/Users/x/a.txt', '/Users/x/b.txt']);
-    assert.deepStrictEqual([an.stamp.ts, an.stamp.o, an.mb], [7000, 'M', 10]);
+    assert.deepStrictEqual([an.stamp.ts, an.stamp.o, an.mb, an.to], [7000, 'M', 10, ['W']]);
     r.settings.clipboard.files = false;
     now = 7100;
     await r.copy({ files: ['/Users/x/c.txt'] });
@@ -210,7 +221,7 @@ const flush = async (clip) => { for (let i = 0; i < 4; i++) { await new Promise(
     const drop = new EventEmitter();
     drop.expected = [];
     drop.expectBatch = (id, dir, quiet) => drop.expected.push({ id, dir, quiet });
-    const fc = new FileClip({ server: r.server, helper: r.helper, fileSend: {}, drop, getSettings: () => ({ files: { shortcuts: false, pasteKeys: 'Control+Alt+V' } }), clipboard: r.clip });
+    const fc = new FileClip({ server: r.server, bus: r.bus, helper: r.helper, fileSend: {}, drop, getSettings: () => ({ files: { shortcuts: false, pasteKeys: 'Control+Alt+V' } }), clipboard: r.clip });
     r.server.current = { name: 'PC', deviceId: 'W' };
     const offer = { t: T.FCLIP_OFFER, id: 'f1', items: [{ name: 'a.txt', size: 3 }], files: 1, bytes: 3, ts: 8000, o: 'W', auto: true, eager: true };
     r.server.emit(`t:${T.FCLIP_OFFER}`, offer);

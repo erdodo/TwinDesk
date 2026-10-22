@@ -67,6 +67,7 @@ async function world(names, pairs, { clip = false, notifs = false } = {}) {
       n.clipboard = fakeClipboard();
       n.clipSettings = { enabled: true, send: true, receive: true, mode: 'switch', historySize: 20, maxKB: 256, skipConcealed: true };
       n.clip = new Clip({ bus: n.hub.bus, mesh: n.mesh, getSettings: () => n.clipSettings, onChange: () => {}, clipboard: n.clipboard });
+      await n.clip.tick(); // the first look: what is on the clipboard at start is not a copy
     }
     if (notifs) {
       n.helper = new FakeHelper();
