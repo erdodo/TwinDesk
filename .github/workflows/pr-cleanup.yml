@@ -3,7 +3,7 @@ name: Remove the pull request's pre-release
 # The test build of a pull request (v2.1.1-pr9) goes away when the pull request closes or merges.
 on:
   pull_request:
-    branches: [main]
+    branches: [mesh]
     types: [closed]
 
 permissions:

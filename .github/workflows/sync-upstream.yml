@@ -1,0 +1,89 @@
+name: Sync upstream
+
+# TwinDesk Mesh follows upstream TwinDesk (InukaAsith/TwinDesk). `main` here is a pure mirror of the
+# upstream main (so GitHub's "Sync fork" keeps working) and `mesh` is this project's own branch:
+# every upstream change is merged into it. A clean merge is pushed; a conflict (or a merge that
+# needs the workflow permission) opens a pull request or an issue instead of breaking `mesh`.
+#
+# Scheduled workflows of a fork are off until you enable Actions in the repository. To let the merge
+# change workflow files, add a personal access token with the `workflow` scope as the secret
+# SYNC_TOKEN; without it, such a merge ends in a pull request you merge by hand.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/InukaAsith/TwinDesk.git
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: mesh
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "erdodo"
+          git config user.email "erdoganyesil3@gmail.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          echo "behind=$(git rev-list --count HEAD..upstream/main)" >> "$GITHUB_ENV"
+
+      # `main` is the mirror: fast-forward only, so it never holds anything of ours.
+      - name: Keep main in step with upstream
+        if: env.behind != '0'
+        run: git push origin upstream/main:refs/heads/main || echo "::warning::main could not be fast-forwarded (it has commits of its own?)"
+
+      - name: Merge upstream into mesh
+        id: merge
+        if: env.behind != '0'
+        run: |
+          if git merge --no-edit upstream/main -m "Merge upstream TwinDesk (upstream/main) into mesh"; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the merge
+        id: push
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          if git push origin HEAD:mesh; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Conflicts, or a push the token may not do (workflow files): leave it to a person.
+      - name: Ask for a manual merge
+        if: env.behind != '0' && (steps.merge.outputs.clean == 'false' || steps.push.outputs.pushed == 'false')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse --short upstream/main)
+          if gh issue list --state open --label upstream-sync --json number --jq '.[0].number' | grep -q .; then exit 0; fi
+          gh label create upstream-sync --color 0e8a16 --description "Upstream TwinDesk needs a manual merge" 2>/dev/null || true
+          gh issue create --label upstream-sync --title "Upstream TwinDesk $sha needs a manual merge into mesh" --body "Merging upstream/main into mesh did not go through on its own (a conflict, or workflow files changed and no SYNC_TOKEN secret is set).
+
+          Locally:
+
+          \`\`\`
+          git fetch https://github.com/InukaAsith/TwinDesk.git main
+          git checkout mesh && git merge FETCH_HEAD
+          # fix conflicts, run the tests, push
+          \`\`\`"

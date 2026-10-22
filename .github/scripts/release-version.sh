@@ -6,7 +6,7 @@
 #   prerelease  true for a pull request build
 #   publish     true when this run puts the files on a release
 #   sha         the commit the release points at
-# Counts from the newest stable release: a merge to main is the next minor (2.1.0 -> 2.2.0, then
+# Counts from the newest stable release: a merge to mesh is the next minor (2.1.0 -> 2.2.0, then
 # 2.3.0 ...). Every pull request build is the next free patch of that minor as a pre-release
 # (2.1.1, then 2.1.2 ...; tag v2.1.1-pr9), so no two builds share a version and the Android
 # versionCode keeps rising. A pull request's older pre-releases go once its new one is up.

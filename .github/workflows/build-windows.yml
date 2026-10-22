@@ -1,6 +1,6 @@
 name: Build Windows
 
-# release.yml calls this for pull requests and merges to main (version, code and release_tag set).
+# release.yml calls this for pull requests and merges to mesh (version, code and release_tag set).
 # Pushing a v* tag, or running it by hand with a tag, builds that ref and puts the files on that release.
 on:
   workflow_call:
@@ -23,9 +23,9 @@ on:
         required: false
         default: ''
       ref:
-        description: Branch to build (a test branch; releases come from main).
+        description: Branch to build (a test branch; releases come from mesh).
         required: false
-        default: main
+        default: mesh
       virustotal:
         description: Scan the installers on VirusTotal (needs the VT_API_KEY secret; uploads are shared with its partners)
         type: boolean

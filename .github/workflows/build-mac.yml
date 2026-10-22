@@ -1,6 +1,6 @@
 name: Build Mac
 
-# release.yml calls this for pull requests and merges to main (version, code and release_tag set).
+# release.yml calls this for pull requests and merges to mesh (version, code and release_tag set).
 # Pushing a v* tag, or running it by hand with a tag, builds that ref and puts the files on that release.
 on:
   workflow_call:

@@ -8,9 +8,9 @@ on:
         required: false
         default: ''
       ref:
-        description: Branch to build (a test branch; releases come from main).
+        description: Branch to build (a test branch; releases come from mesh).
         required: false
-        default: main
+        default: mesh
 
 # Write: the full Android APK can come from a draft release, which a read-only token can't see.
 permissions:
@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # main unless another branch is asked for (ref), whichever branch the run was started from.
+      # mesh unless another branch is asked for (ref), whichever branch the run was started from.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'main' }}
+          ref: ${{ inputs.ref || 'mesh' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -66,5 +66,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ inputs.tag }}" >/dev/null 2>&1 || gh release create "${{ inputs.tag }}" --draft --target main --title "${{ inputs.tag }}" --notes "" || true
+          gh release view "${{ inputs.tag }}" >/dev/null 2>&1 || gh release create "${{ inputs.tag }}" --draft --target mesh --title "${{ inputs.tag }}" --notes "" || true
           gh release upload "${{ inputs.tag }}" linux/dist/TwinDesk-Mesh-*.AppImage linux/dist/TwinDesk-Mesh-*.deb --clobber

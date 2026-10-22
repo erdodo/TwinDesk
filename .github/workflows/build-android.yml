@@ -1,6 +1,6 @@
 name: Build Android
 
-# release.yml calls this for pull requests and merges to main (version, code and release_tag set).
+# release.yml calls this for pull requests and merges to mesh (version, code and release_tag set).
 # Pushing a v* tag, or running it by hand with a tag, builds that ref and puts the files on that release.
 on:
   workflow_call:
@@ -23,9 +23,9 @@ on:
         required: false
         default: ''
       ref:
-        description: Branch to build (a test branch; releases come from main).
+        description: Branch to build (a test branch; releases come from mesh).
         required: false
-        default: main
+        default: mesh
 
 # Write: the files can go straight onto a release.
 permissions:

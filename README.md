@@ -4,7 +4,9 @@
 
 <h1 align="center"><a href="https://twin-desk.vercel.app">TwinDesk Mesh</a></h1>
 
-> **TwinDesk Mesh** is a fork build of [TwinDesk](https://github.com/InukaAsith/TwinDesk). It has its own app identity (Android `com.twindesk.mesh`, macOS `org.macshare.mesh`, own Windows/Linux names and data folders), so it installs **next to** upstream TwinDesk and neither replaces the other. It speaks the same network protocol, so Mesh and upstream builds still pair and talk to each other. Both use the same default ports, so run only one of them at a time on one computer. On first start it copies (never moves) upstream's settings and pairings. Android data cannot move across package ids: pair the phone again.
+> **TwinDesk Mesh** is a spin-off of [TwinDesk](https://github.com/InukaAsith/TwinDesk) that connects **many** computers and phones at the same time: one shared clipboard and notification pool, one layout map for the cursor, several phones, a screen per device, and "join everyone" (pair a device once, the mesh pairs the rest). Design: [docs/mesh.md](docs/mesh.md), [docs/screen-mesh.md](docs/screen-mesh.md). Upstream TwinDesk stays the refined one-to-one app; every upstream update is merged here (see `.github/workflows/sync-upstream.yml`).
+>
+> It has its own app identity (Android `com.twindesk.mesh`, macOS `org.macshare.mesh`, own Windows/Linux names and data folders), so it installs **next to** TwinDesk and neither replaces the other. It speaks the same network protocol, so Mesh and TwinDesk builds still pair and talk to each other. Both use the same default ports, so run only one of them at a time on one computer. On first start it copies (never moves) TwinDesk's settings and computer pairings; phones must be paired again with the Mesh app (its Android package id is different).
 
 <p align="center">
   <b>All your computers and your phone, working as one desk.</b><br>
@@ -13,14 +15,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/InukaAsith/TwinDesk/releases/latest"><b>⬇️ Download 2.1</b></a> ·
+  <a href="https://github.com/erdodo/TwinDesk/releases/latest"><b>⬇️ Download TwinDesk Mesh</b></a> ·
   <a href="https://twin-desk.vercel.app"><b>Website</b></a> ·
   <a href="#-new-in-21"><b>What's new</b></a> ·
   <a href="#under-the-hood"><b>How it works</b></a>
 </p>
 
 <p align="center">
-  <img alt="Version 2.1" src="https://img.shields.io/github/v/release/InukaAsith/TwinDesk?label=version&color=4b8bff">
+  <img alt="Version 2.1" src="https://img.shields.io/github/v/release/erdodo/TwinDesk?label=version&color=4b8bff">
   <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-black">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078d4">
   <img alt="Linux X11 and Wayland" src="https://img.shields.io/badge/Linux-X11%20%7C%20Wayland-f0a30a">
@@ -389,7 +391,7 @@ Every pair connects over the same Wi-Fi, Bluetooth, or a direct Wi-Fi link; a ph
 
 ## Get started
 
-1. **Download** TwinDesk for each computer and your phone from the [releases](https://github.com/InukaAsith/TwinDesk/releases/latest).
+1. **Download** TwinDesk Mesh for each computer and your phone from the [releases](https://github.com/erdodo/TwinDesk/releases/latest).
 2. **Open it on both.** They find each other on the same network, over Bluetooth, or over a USB cable for a phone.
 3. **Pair once** by comparing a code (on a USB cable, just click Allow). From then on they connect by themselves.
 
