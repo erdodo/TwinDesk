@@ -57,7 +57,8 @@ function startServices({ server, getSettings, pushState, onHelperReady, hub: mes
   const pcView = new PcView({ server, getSettings: s, saveSettings: () => store.saveSettings(s()) });
   const pcApps = new PcApps({ server, getSettings: s });
   const notifs = new Notifs({ bus: meshHub.bus, mesh, helper, getSettings: s, saveSettings: () => store.saveSettings(s()), selfName });
-  const fileClip = new FileClip({ server, helper, fileSend, drop, getSettings: s });
+  const fileClip = new FileClip({ server, bus: meshHub.bus, helper, fileSend, drop, getSettings: s, clipboard });
+  clipboard.fileClip = fileClip;
   kvm.fileClip = fileClip;
   const appSend = new AppSend({ server, helper, getSettings: s }); // This Mac's apps on another Mac
   const wake = new Wake({ server, getSettings: s, saveSettings: () => store.saveSettings(s()) });
@@ -109,6 +110,7 @@ function startServices({ server, getSettings, pushState, onHelperReady, hub: mes
       pcApps.shutdown();
       appSend.shutdown();
       kvm.shutdown();
+      clipboard.shutdown(); // the Recent list's images and files go
       hub.shutdown(); // unmute this Mac if we muted it while sending
       stream.stop('off');
       helper.stop(); // closes stdin: the helper exits and the virtual display goes away

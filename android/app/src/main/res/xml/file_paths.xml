@@ -4,4 +4,6 @@
     <cache-path name="clip" path="clip/" />
     <!-- The update being installed (Updates). -->
     <cache-path name="updates" path="updates/" />
+    <!-- The Recent list's kept images and files, to copy them again (ClipHistory.kt). -->
+    <cache-path name="cliphist" path="clip-history/" />
 </paths>

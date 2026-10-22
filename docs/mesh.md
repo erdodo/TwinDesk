@@ -62,8 +62,11 @@ string, `selected` is the session object; never overload them.
   changes. Receivers keep it in the `Roster`.
 - Pooled messages (`clip`, `notif`) get three optional fields, set by the device where the item
   starts: `o` (origin device id), `s` (origin sequence number, increases per origin and pool) and
-  `d` (the origin's direct links at that moment, array of ids). A pooled message without `o` comes
+  `d` (the origin's direct links at that moment, array of ids). A pooled message without `s` comes
   from a one-to-one peer: it is applied and published into the pool as if the sender were its origin.
+  (A clipboard item also has `ts` and `o` as the time of its copy and the device that copied, see
+  "Clipboard: the latest copy wins"; a one-to-one peer sends those without `s`, and a one-to-one
+  peer is sent `ts` and `o` too, without `s`, `d` and `h`.)
 
 ## Pool rules (`Pool` in `shared/mesh.js`)
 
@@ -78,8 +81,64 @@ string, `selected` is the session object; never overload them.
 - A peer that switched the pool off (`pool:false` in the registry) is never sent items and items from it are ignored. A device that switched it off for itself does not call the pool at all, so it neither applies nor relays. A failed send to a direct link is not retried: that link is down and the device gets the next item after it reconnects.
 - Applying an item must not publish it again (no echo): the feature remembers what it just wrote to
   the OS clipboard or showed as a notification for 30 s and ignores the OS event it causes.
-- Clipboard items are text up to `CLIP_MAX_BYTES`. A device may switch the pool off for itself
+- Clipboard text is up to `CLIP_MAX_BYTES` (images and files: see "Clipboard: the latest copy wins"). A device may switch the pool off for itself
   (`clip.policy`, `notif.policy`); a device that has it off neither applies nor relays for others.
+
+## Clipboard: the latest copy wins
+
+What was copied last, on any device and of any kind (text, an image, files), is what every device
+pastes. The rules are in `shared/clipsync.js` (JS) and `ClipSync.kt` (Android); the pool decides who
+gets an item, the time decides which item wins.
+
+- **A time for every copy.** Each device watches its clipboard all the time (about every 500 ms on
+  Windows, the helper's change count on the Mac, the clip listener on Android), also with sending off
+  and in switch mode, and stamps every copy `{ts, o}` at the moment it happens: `ts` from a hybrid
+  logical clock (wall clock that never goes backwards and moves past any time seen from another
+  device) and `o` the device that copied. The stamp is the copy's, never the time of sending: a
+  `clip.request` answer or a push in switch mode of an old copy stays old.
+- **Pool first, time second.** An incoming item goes through the pool as before: the `(o, s)` dedupe
+  drops echoes and repeats and the item is relayed. Then `Latest.accept` compares `{ts, o}` with the
+  newest copy this device knows of (its own last copy counts) and applies the item only when it is
+  newer (a tie goes to the larger device id, so all devices agree). So a late push, a relayed old
+  copy or a fresh pool item that carries an old time can never replace a newer copy; the pool may
+  still relay it (relaying does not depend on the time). Pooled `clip` and `clip.image` messages
+  carry `ts` next to the pool's stamps; the pool's `o` is the device that made the copy, so the two
+  `o` are the same id. Items without `ts` (older apps) count as copied on arrival. Applying an item
+  is never taken for a local copy (no echo, no new stamp).
+- **After a link comes up** the device tells the new peer, and only it, its newest copy as
+  `clip.latest {ts, o, kind}`; a peer that holds an older one asks with `clip.request` and gets the
+  copy with its original stamp (published to the pool; the devices that have it ignore it by time).
+- **Images** are `clip.image {id, w, h, png (base64), ts, o}` up to `CLIP_IMAGE_MAX_BYTES`, pooled like
+  text: relayed unchanged (the PNG is not re-encoded per hop), only to devices that take images (their
+  `clip.policy` has `images`), settings `clipboard.images`.
+- **Files copied normally** (Explorer, Finder, a file manager, the Files app) are announced with
+  `fclip.offer {…, ts, o, eager}` straight to every connected device whose policy takes files
+  (`clip.policy` has `files`, setting `clipboard.files`); offers are not relayed, and a device that
+  is not directly linked is skipped. A receiver of an `eager` offer up to `clipboard.filesMaxMB` asks
+  the announcing device for the files itself (`fclip.paste`, files arrive in a cache folder) and puts
+  the local paths on its clipboard if that offer is still the newest copy; a bigger one only shows
+  "N MB: use <shortcut> to paste". `fclip.gone` retracts an offer when a newer copy replaces it.
+  The file transfer itself follows the selected device (see Layers): a device fetches an eager offer
+  only from its selected device, and the announcer serves only its own selected device. An offer from
+  any other connected device is just noted for the order (so an older text cannot replace it).
+- **The Recent list** (`shared/clip-history.js`, `ClipHistory.kt`) keeps text, images and files in both
+  directions for "copy again" and a full Preview. Everything that goes through the pool is recorded:
+  what this device publishes (text, image, files announced) and what it applies from the pool
+  (`clip`, `clip.image`, files that arrived from a fetch). A row names the device that copied it
+  (the origin, else the sender). Text lives in memory; images and files are kept in the app's cache
+  folder (wiped when the app starts, on Clear and on quit), limited by item count and total size;
+  one too big is listed by name only and cannot be copied again. Copying an item again
+  (`copyHistory(id)`) puts it on the clipboard as a new copy: it gets a new `{ts, o}`, is published
+  to the pool (or announced to the devices that take files) like any copy, and is not listed twice.
+  History size 0 keeps nothing and writes nothing.
+- **Background read on Android.** The phone can read its clipboard only while in front. A copy made
+  behind is stamped when the clipboard changes; it is read and sent at once when wireless debugging
+  granted the background read, or when "Display over other apps" is allowed (`ClipFocus.kt` takes
+  the input focus for a moment through a 1 px overlay window); otherwise when the app comes to the
+  front. The Clipboard tab shows which of these is in effect.
+- **Clipboard loop guards** (`shared/clipguard.js`, `ClipGuard.kt`): a change is compared by its CONTENT only (text with line breaks normalised, images by size and a pixel sample, files by names and sizes), never by the format list. What a device writes or sends is remembered for 8 s (`EchoGuard`), so its echo is not a copy; an incoming item equal to the clipboard content is not written again. `Breaker` pauses stamping and sending for 30 s after more than 8 copies in 10 s, and the page says so (`paused`, `pausedUntil`).
+- **Switches are per device and unchanged:** `clip.policy` (`accept`, and now `images` and `files`)
+  per peer, the hop limit, and the notification pool, which has no time and is not touched.
 
 ## Compatibility rules
 

@@ -17,10 +17,14 @@ const P = require('./protocol.js');
 const STAMP_FIELDS = ['o', 's', 'd', 'h'];
 
 // The message as an old app sees it: pool stamps removed. Never mutates its input.
+// Exception: a clipboard item that carries the time of its copy (`ts`, clipsync.js) keeps `o`, because
+// there it is the device that made the copy, which the old one-to-one apps of the same kind read.
+// For an origin item that is the same id as the pool's `o`.
 function plain(msg) {
   const out = {};
+  const timed = Number.isFinite(msg.ts);
   for (const k of Object.keys(msg)) {
-    if (!STAMP_FIELDS.includes(k)) out[k] = msg[k];
+    if (!STAMP_FIELDS.includes(k) || (k === 'o' && timed)) out[k] = msg[k];
   }
   return out;
 }
@@ -62,7 +66,7 @@ class Pool {
     const sent = [];
     for (const p of peers) {
       if (p.pool === false) continue;
-      const ok = p.send(p.mesh ? stamped : plain(msg));
+      const ok = p.send(p.mesh ? stamped : plain(stamped));
       if (ok) sent.push(p.id);
     }
     return { msg: stamped, sent };
@@ -82,8 +86,9 @@ class Pool {
     }
 
     let m = msg;
-    if (m.o === undefined) {
-      // A message without stamps comes from an old one-to-one peer, which is the origin of it.
+    if (m.s === undefined) {
+      // A message without a sequence comes from an old one-to-one peer, which is the origin of it
+      // (an `o` it carries, the origin of a clipboard copy's time, is that peer too).
       const s = (this._legacySeq.get(fromId) || 0) + 1;
       this._legacySeq.set(fromId, s);
       m = Object.assign({}, msg, { o: fromId, s, d: [fromId], h: 0 });

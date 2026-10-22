@@ -32,6 +32,7 @@ async function world(ids, links, o = {}) {
     });
     made.push(dev.clip);
     devs[id] = dev;
+    await dev.clip.tick(); // the first look: what is on the clipboard at start is not a copy
   }
   for (const id of o.legacy || []) devs[id] = net.add(id, { name: 'OLD-' + id, legacy: true });
   for (const [a, b] of links) net.connect(a, b);
@@ -128,7 +129,8 @@ scenario('a device with receive off gets nothing and relays nothing', async () =
   net.connect('A', 'D');
   await net.run();
   await copy(net, devs.A, 'y');
-  assert.deepStrictEqual(writes(devs.D), ['y'], 'D gets it from A, once');
+  // The new link: A tells D its latest copy (clip.latest), D asks and gets x; then y, each once.
+  assert.deepStrictEqual(writes(devs.D), ['x', 'y'], 'D gets both from A, once each');
   assert.deepStrictEqual(writes(devs.C), []);
   assert.strictEqual(net.sent('clip', 'C').length, 0);
 });
@@ -151,13 +153,12 @@ scenario('two copies at once on different devices: both propagate, each device a
   devs.B.clipboard.text = 'y';
   await devs.B.clip.sendIfChanged('copy');
   await net.run();
-  // Arrival order: A gets y, B gets x, C gets x then y. Each device ends with the last item it applied.
+  // The latest copy wins (clipsync.js): y was copied after x (a tie in the same millisecond goes to
+  // the larger device id, B), so A takes y, B ignores the older x, C gets x then y. Everyone ends with y.
   assert.deepStrictEqual(writes(devs.A), ['y']);
-  assert.deepStrictEqual(writes(devs.B), ['x']);
+  assert.deepStrictEqual(writes(devs.B), []);
   assert.deepStrictEqual(writes(devs.C), ['x', 'y']);
-  assert.strictEqual(devs.A.clipboard.text, 'y');
-  assert.strictEqual(devs.B.clipboard.text, 'x');
-  assert.strictEqual(devs.C.clipboard.text, 'y');
+  for (const id of ['A', 'B', 'C']) assert.strictEqual(devs[id].clipboard.text, 'y', id);
 });
 
 scenario('copies one after another: the last writer wins on every device', async () => {
@@ -184,7 +185,11 @@ scenario('a legacy one-to-one peer (no stamps) works, and a mesh device relays i
   await copy(net, devs.A, 'mine');
   const toOld = devs.L.received.filter((r) => r.msg.t === 'clip').map((r) => r.msg);
   assert.deepStrictEqual(toOld.map((m) => m.text), ['mine']);
-  for (const k of ['o', 's', 'd', 'h']) assert.ok(!(k in toOld[0]), 'plain: no ' + k);
+  for (const k of ['s', 'd', 'h']) assert.ok(!(k in toOld[0]), 'plain: no ' + k);
+  // ...but the time of the copy and the device that made it (clipsync.js) stay, so an old app of the
+  // latest-copy-wins kind orders it right; for an origin item that is the pool's origin too.
+  assert.strictEqual(toOld[0].o, 'A');
+  assert.ok(toOld[0].ts > 0);
   assert.deepStrictEqual(writes(devs.B), ['from old', 'mine']);
 });
 

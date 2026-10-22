@@ -114,7 +114,8 @@ class MainActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         // In front: Android lets us read the clipboard now.
-        if (hasFocus) Core.get(this).let { if (it.sync.get("clipboard", "out")) it.clip.sendCurrent(false) }
+        // (a copy made while we were behind is stamped when it happened and goes now)
+        if (hasFocus) Core.get(this).clip.sendCurrent(false)
     }
 
     companion object {
@@ -235,13 +236,13 @@ fun App(core: Core, resumed: Int) {
         if (wide) {
             Row(Modifier.safeDrawingPadding()) {
                 Sidebar(core, v, tab) { tab = it }
-                Page(core, v, tab, Modifier.weight(1f))
+                Page(core, v + resumed, tab, Modifier.weight(1f))
             }
         } else {
             Column(Modifier.safeDrawingPadding()) {
                 TopIdentity(core, v)
                 if (more) MoreList(core, v, Modifier.weight(1f)) { tab = it; more = false }
-                else Page(core, v, tab, Modifier.weight(1f))
+                else Page(core, v + resumed, tab, Modifier.weight(1f))
                 NavigationBar(containerColor = pal.card) {
                     val item = @Composable { label: String, icon: ImageVector, colors: List<Color>, selected: Boolean, go: () -> Unit ->
                         NavigationBarItem(
@@ -1021,18 +1022,33 @@ private fun ClipboardPage(core: Core, v: Int) {
         DirHead(name, false, me, true)
         SwitchRow("Copies on $name land here", "At once", core.sync.get("clipboard", "in"), first = true) { core.sync.set("clipboard", "in", it) }
     }
+    if (core.clip.paused) Note("Clipboard sync paused for 30 s: copies were coming in too fast (a loop?)", "warn")
     MacCard {
         DirHead(me, true, name, false)
         SwitchRow("Copies here go to $name", "While TwinDesk is open, or always with wireless debugging", core.sync.get("clipboard", "out"), first = true) { core.sync.set("clipboard", "out", it) }
+        val atOnce = core.clip.backgroundGranted || core.clip.overlayAllowed
+        MacRow(
+            "Copies from this phone",
+            if (atOnce) "Sent at once" else "Sent only when TwinDesk is open. Allow Display over other apps to send them in the background",
+        ) {
+            if (atOnce) Pill("At once", "good")
+            else Secondary("Allow") { ctx.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))) }
+        }
         if (core.host != null) MacRow("Send the clipboard now", "Also: the Send clipboard tile in Quick Settings") { Secondary("Send") { core.clip.sendCurrent(true) } }
     }
-    if (core.clip.history.isNotEmpty()) MacCard("Recent") {
-        core.clip.history.toList().take(12).forEachIndexed { i, (dir, text) ->
-            MacRow(text.replace('\n', ' ').take(120), if (dir == "in") "From $name · tap to copy" else "To $name · tap to copy", first = i == 0, onClick = {
-                ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("TwinDesk", text))
-            })
+    MacCard("Images and files") {
+        SwitchRow("Images", "Pictures copied on one are pasted on the other", core.store.flag("clipboard.images", true), first = true) { core.store.setFlag("clipboard.images", it); core.changed() }
+        SwitchRow("Files", "Files copied in the Files app or a file manager go with the clipboard", core.store.flag("clipboard.files", true)) { core.store.setFlag("clipboard.files", it); core.changed() }
+        val sizes = listOf(10, 25, 50, 100, 250, 500)
+        val at = sizes.indexOf(core.store.int("clipboard.filesMaxMB", 50)).let { if (it < 0) 2 else it }
+        MacRow("Largest files that go at once", "Bigger ones wait until you paste them on $name with ⌃⌥V") {
+            MacSlider(at.toFloat(), 0f..5f, 4, { "${sizes[Math.round(it).coerceIn(0, 5)]} MB" }) { v ->
+                core.store.setInt("clipboard.filesMaxMB", sizes[Math.round(v).coerceIn(0, 5)])
+                core.changed()
+            }
         }
     }
+    ClipRecentCard(core, name)
 }
 
 // ---- Notifications ----

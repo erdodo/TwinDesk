@@ -53,7 +53,7 @@ const SCHEMA = {
   mount: { on: bool },
   clipboard: {
     enabled: bool, send: bool, receive: bool, mode: oneOf(['switch', 'instant'], 'instant'),
-    skipConcealed: bool, maxKB: oneOf([16, 64, 256], 256), historySize: (v) => Math.round(clamp(0, 100, 20)(v)),
+    skipConcealed: bool, maxKB: oneOf([16, 64, 256], 256), images: bool, files: bool, filesMaxMB: oneOf([10, 50, 200, 500, 1000], 50), historySize: (v) => Math.round(clamp(0, 100, 20)(v)),
   },
 };
 
@@ -511,8 +511,8 @@ function setupIpc(ctx) {
       setGroup('clipboard', partial);
       ctx.clipboard.applySettings();
     },
-    copyHistory(index) {
-      ctx.clipboard.copyHistory(Number(index));
+    copyHistory(id) {
+      ctx.clipboard.copyHistory(String(id));
     },
     clearHistory() {
       ctx.clipboard.clearHistory();
@@ -545,6 +545,7 @@ function setupIpc(ctx) {
 
   ipcMain.handle('getState', () => ctx.state);
   ipcMain.handle('phoneAssets', () => ctx.phone.assetsView());
+  ipcMain.handle('previewHistory', (_e, id) => ctx.clipboard.previewHistory(String(id))); // the whole Recent item
   for (const [name, fn] of Object.entries(actions)) ipcMain.on(name, (_e, arg) => fn(arg));
   return actions;
 }

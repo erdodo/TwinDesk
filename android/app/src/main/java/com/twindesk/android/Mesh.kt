@@ -6,7 +6,8 @@
 package com.twindesk.android
 
 // A pooled message: the feature's own fields (body: t, text, …) and the stamps (docs/mesh.md).
-// o == null means no stamps: the message came from an old one-to-one peer, or it is what one gets.
+// o == null means no stamps: the message came from an old one-to-one peer (a `ts` and `o` it carries
+// are the time of a clipboard copy and stay in the body), or it is what one gets.
 data class PoolMsg(
     val body: Map<String, Any?>,
     val o: String? = null, // origin device id
@@ -15,7 +16,14 @@ data class PoolMsg(
     val h: Int = 0, // hops: 0 at the origin, +1 per relay
 ) {
     // The message as a peer of this kind gets it: a mesh peer gets the stamps, an old app the plain body.
-    fun forPeer(mesh: Boolean): PoolMsg = if (mesh) this else copy(o = null, s = 0L, d = emptyList(), h = 0)
+    // A clipboard item with the time of its copy (`ts`, ClipSync.kt) keeps its `o` for an old app too:
+    // there `o` is the device that made the copy (the same id as the pool's origin).
+    fun forPeer(mesh: Boolean): PoolMsg {
+        if (mesh) return this
+        val origin = o
+        val plain: Map<String, Any?> = if (origin != null && body["ts"] is Number) body + ("o" to origin) else body
+        return copy(body = plain, o = null, s = 0L, d = emptyList(), h = 0)
+    }
 }
 
 // A connected device as the pool sees it. send returns false when the message could not be sent.

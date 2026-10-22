@@ -30,6 +30,7 @@ class FakeHelper extends EventEmitter {
     this.sent = [];
     this.concealed = false;
     this.readable = true;
+    this.count = 1; // the pasteboard's changeCount
   }
 
   send(name, args) {
@@ -37,14 +38,15 @@ class FakeHelper extends EventEmitter {
   }
 
   request(name) {
-    if (name === 'clipboardInfo') return Promise.resolve({ concealed: this.concealed });
+    if (name === 'clipboardInfo') return Promise.resolve({ concealed: this.concealed, changeCount: this.count });
     if (name === 'notifWatch') return Promise.resolve({ readable: this.readable });
     return Promise.resolve({});
   }
 
   // A copy made in the OS (the helper's clipboard watch).
   copy(text, { concealed = false, initial = false } = {}) {
-    this.emit('event', 'clipboard', { concealed, initial });
+    this.count += 1;
+    this.emit('event', 'clipboard', { changeCount: this.count, text: !!text, concealed, initial });
     return text;
   }
 
