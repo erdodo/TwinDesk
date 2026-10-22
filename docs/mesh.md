@@ -121,6 +121,21 @@ gets an item, the time decides which item wins.
   The file transfer itself follows the selected device (see Layers): a device fetches an eager offer
   only from its selected device, and the announcer serves only its own selected device. An offer from
   any other connected device is just noted for the order (so an older text cannot replace it).
+- **The Recent list** (`shared/clip-history.js`, `ClipHistory.kt`) keeps text, images and files in both
+  directions for "copy again" and a full Preview. Everything that goes through the pool is recorded:
+  what this device publishes (text, image, files announced) and what it applies from the pool
+  (`clip`, `clip.image`, files that arrived from a fetch). A row names the device that copied it
+  (the origin, else the sender). Text lives in memory; images and files are kept in the app's cache
+  folder (wiped when the app starts, on Clear and on quit), limited by item count and total size;
+  one too big is listed by name only and cannot be copied again. Copying an item again
+  (`copyHistory(id)`) puts it on the clipboard as a new copy: it gets a new `{ts, o}`, is published
+  to the pool (or announced to the devices that take files) like any copy, and is not listed twice.
+  History size 0 keeps nothing and writes nothing.
+- **Background read on Android.** The phone can read its clipboard only while in front. A copy made
+  behind is stamped when the clipboard changes; it is read and sent at once when wireless debugging
+  granted the background read, or when "Display over other apps" is allowed (`ClipFocus.kt` takes
+  the input focus for a moment through a 1 px overlay window); otherwise when the app comes to the
+  front. The Clipboard tab shows which of these is in effect.
 - **Switches are per device and unchanged:** `clip.policy` (`accept`, and now `images` and `files`)
   per peer, the hop limit, and the notification pool, which has no time and is not touched.
 
