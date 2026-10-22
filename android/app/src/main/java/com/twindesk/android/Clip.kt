@@ -62,7 +62,15 @@ class Clip(core: Core) : Feature(core) {
 
     private var own: Own? = null
     private var pending: Stamp? = null // copied, but not readable yet (we were not in front)
-    private var lastSig: String? = null // of the clipboard as last read: the same again is no new copy
+    // What the clipboard holds, by CONTENT (never by its formats or uris), the echo of our own writes
+    // and the breaker for runaway copies (ClipGuard.kt): a change that shows content we wrote or
+    // sent a moment ago is the system or a keyboard touching it, not a new copy.
+    private val watch = ClipWatch()
+    private var pauseLogged = false
+
+    // Copies are not being stamped for a while: they were coming in too fast (a loop?).
+    val paused get() = watch.breaker.paused
+    val pausedUntil get() = watch.breaker.until
     @Volatile private var selfUntil = 0L // our own write to the clipboard is not a copy
 
     val clipDir get() = File(core.ctx.cacheDir, "clip")
@@ -112,20 +120,25 @@ class Clip(core: Core) : Feature(core) {
                 ClipData.newPlainText(IN_LABEL, h.text) to Content("text", "t:${h.text}", text = h.text)
             is ClipHistory.Content.Image -> {
                 val png = h.file.readBytes()
-                ClipData.newUri(cr, IN_LABEL, uri(h.file)) to Content("image", "i:${png.size}:${Proto.sha256(png).hex().take(16)}", png = png, w = h.w, h = h.h)
+                ClipData.newUri(cr, IN_LABEL, uri(h.file)) to Content("image", imageSig(png, h.w, h.h), png = png, w = h.w, h = h.h)
             }
             is ClipHistory.Content.Files -> {
                 val uris = h.paths.filter { it.isFile }.map { uri(it) }
                 if (uris.isEmpty()) return
                 val d = ClipData.newUri(cr, IN_LABEL, uris[0])
                 for (u in uris.drop(1)) d.addItem(cr, ClipData.Item(u))
-                d to Content("files", "u:" + uris.joinToString("|"), uris = uris)
+                d to Content("files", urisSig(uris), uris = uris)
             }
         }
         selfUntil = System.currentTimeMillis() + 2000
         cm.setPrimaryClip(clip)
         pending = null
-        lastSig = c.sig
+        watch.wrote(c.sig) // (a person's copy: it passes the breaker, and never trips it by itself)
+        if (watch.breaker.paused) {
+            own = null
+            core.changed()
+            return
+        }
         val o = Own(latest.copied(c.kind), c)
         own = o
         if (c.kind != "files") core.fclip.retire()
@@ -138,6 +151,7 @@ class Clip(core: Core) : Feature(core) {
     }
 
     override fun onWelcome(host: Host) {
+        pauseLogged = false
         peerAccepts = false
         sendPolicy()
         latest.latest()?.let { core.send(msg(Proto.T.CLIP_LATEST, "ts" to it.ts, "o" to it.o, "kind" to it.kind)) }
@@ -176,9 +190,14 @@ class Clip(core: Core) : Feature(core) {
     @Synchronized private fun local(clip: ClipData?, d: ClipDescription?) {
         if (clip == null) {
             // Not readable now (not in front): stamp the copy now, read and send it when we are.
-            pending = latest.copied(kindOf(d))
             own = null
-            lastSig = null
+            watch.forget()
+            if (!watch.breaker.hit()) {
+                pending = null
+                logPaused()
+                return
+            }
+            pending = latest.copied(kindOf(d))
             core.fclip.retire()
             focus.request()
             return
@@ -200,12 +219,17 @@ class Clip(core: Core) : Feature(core) {
         if (mine && !force) return
         val c = content(clip) ?: return
         var o = own
-        val fresh = c.sig != lastSig || o == null
+        val fresh = when (watch.detect(c.sig, o != null, force)) {
+            ClipWatch.Verdict.SAME -> false
+            ClipWatch.Verdict.COPY -> true
+            ClipWatch.Verdict.ECHO -> { pending = null; return } // our own write touched again: no copy
+            ClipWatch.Verdict.PAUSED -> { pending = null; logPaused(); return }
+        }
         if (fresh) {
+            pauseLogged = false
             val p = pending
             val st = if (!mine && p != null && latest.isCurrent(p)) p else latest.copied(c.kind)
             pending = null
-            lastSig = c.sig
             o = Own(st, c)
             own = o
             if (c.kind != "files") core.fclip.retire()
@@ -213,23 +237,43 @@ class Clip(core: Core) : Feature(core) {
         if (fresh || force) transmit(o!!, force)
     }
 
+    private fun logPaused() {
+        if (!pauseLogged) Log.w("TwinDesk", "clip: copies came in too fast, paused for 30 s")
+        pauseLogged = true
+    }
+
+    // The content key of a picture: its size and a sample of its pixels, never its bytes.
+    private fun imageSig(png: ByteArray, w: Int, h: Int): String {
+        var s = 1
+        while (maxOf(w, h) / (s * 2) >= 256) s *= 2
+        val bmp = runCatching { BitmapFactory.decodeByteArray(png, 0, png.size, BitmapFactory.Options().apply { inSampleSize = s }) }.getOrNull()
+            ?: return ClipGuard.imageKey(w, h, "?")
+        return try { ClipGuard.imageKey(w, h, ClipGuard.sampleHash(bmp.width, bmp.height) { x, y -> bmp.getPixel(x, y) }) } finally { bmp.recycle() }
+    }
+
+    // The content key of files on the clipboard: names and sizes.
+    private fun urisSig(uris: List<Uri>): String {
+        val items = runCatching { core.files.describe(uris) }.getOrDefault(emptyList())
+        return if (items.isEmpty()) "u:" + uris.joinToString("|") else ClipGuard.filesKey(items.map { it.name to it.size })
+    }
+
     private fun content(clip: ClipData): Content? {
         if (clip.itemCount == 0) return null
         val sensitive = runCatching { clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true }.getOrDefault(false)
         val first = clip.getItemAt(0)
         val text = first.text?.toString()
-        if (!text.isNullOrEmpty()) return Content("text", "t:$text", text = text, sensitive = sensitive)
+        if (!text.isNullOrEmpty()) return Content("text", ClipGuard.textKey(text), text = text, sensitive = sensitive)
         val uris = (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }.filter { it.scheme == "content" }
         if (uris.isEmpty()) {
             val t = runCatching { first.coerceToText(core.ctx)?.toString() }.getOrNull()
-            return if (t.isNullOrEmpty()) null else Content("text", "t:$t", text = t, sensitive = sensitive)
+            return if (t.isNullOrEmpty()) null else Content("text", ClipGuard.textKey(t), text = t, sensitive = sensitive)
         }
-        val sig = "u:" + uris.joinToString("|")
+        val sig by lazy { urisSig(uris) }
         val image = uris.size == 1 && (clip.description.hasMimeType("image/*") || core.ctx.contentResolver.getType(uris[0])?.startsWith("image/") == true)
         if (image) {
             if (!core.store.flag("clipboard.images", true)) return Content("image", sig, sensitive = sensitive)
             val png = readPng(uris[0])
-            if (png != null) return Content("image", "i:${png.first.size}:${Proto.sha256(png.first).hex().take(16)}", png = png.first, w = png.second, h = png.third, sensitive = sensitive)
+            if (png != null) return Content("image", imageSig(png.first, png.second, png.third), png = png.first, w = png.second, h = png.third, sensitive = sensitive)
         }
         return Content("files", sig, uris = uris, sensitive = sensitive)
     }
@@ -326,9 +370,11 @@ class Clip(core: Core) : Feature(core) {
         var o = own?.takeIf { it.c.text == text }
         if (o == null) {
             val p = pending?.takeIf { latest.isCurrent(it) }
-            if (p != null) lastSig = "t:$text"
+            val key = ClipGuard.textKey(text)
+            if (p != null) watch.adopt(key)
+            watch.echo.note(key)
             pending = null
-            o = Own(p ?: latest.copied("text"), Content("text", "t:$text", text = text))
+            o = Own(p ?: latest.copied("text"), Content("text", key, text = text))
             own = o
             core.fclip.retire()
         }
@@ -350,11 +396,16 @@ class Clip(core: Core) : Feature(core) {
         latest.accept(m.optLong("ts", 0), m.str("o", 129), m.str("from", 129).ifEmpty { null }, kind, id)
 
     // Put an item from the computer on the clipboard; it is not a copy made here.
+    // Its content is remembered as our own write (the echo of it is no copy); when the clipboard
+    // holds that content already it is not written again, so nothing can change and echo.
     @Synchronized fun setIncoming(clip: ClipData) {
         selfUntil = System.currentTimeMillis() + 2000
         pending = null
-        lastSig = null
         own = null
+        val key = runCatching { content(clip)?.sig }.getOrNull()
+        if (key != null) watch.wrote(key) else watch.forget()
+        val now = readClip()?.let { runCatching { content(it)?.sig }.getOrNull() }
+        if (key != null && key == now) return
         cm.setPrimaryClip(clip)
     }
 
