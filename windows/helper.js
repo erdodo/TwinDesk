@@ -88,6 +88,16 @@ class Helper extends EventEmitter {
     return true;
   }
 
+  // The files on the clipboard (CF_HDROP), as paths.
+  async clipFiles() {
+    return (await this.request('clipFiles')).files || [];
+  }
+
+  // Put these files on the clipboard as a file list, so Explorer's paste pastes them.
+  setFileDrop(paths) {
+    return this.request('setFileDrop', { paths }, 10000);
+  }
+
   send(cmd, args = {}) {
     return this._write({ ...args, cmd });
   }

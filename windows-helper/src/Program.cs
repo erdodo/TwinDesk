@@ -285,6 +285,28 @@ namespace MacShare
                             r["files"] = clip;
                         }, true);
                         return;
+                    case "clipFiles": // the files on the clipboard (a normal Ctrl+C in Explorer)
+                        Async(c, delegate (Dictionary<string, object> r)
+                        {
+                            List<string> cfList = new List<string>();
+                            if (Clipboard.ContainsFileDropList()) foreach (string cfName in Clipboard.GetFileDropList()) cfList.Add(cfName);
+                            r["files"] = cfList;
+                        }, true);
+                        return;
+                    case "setFileDrop": // put these files on the clipboard (CF_HDROP): a normal paste pastes them
+                        List<string> dropPaths = Strings(c, "paths");
+                        Async(c, delegate (Dictionary<string, object> r)
+                        {
+                            System.Collections.Specialized.StringCollection dropList = new System.Collections.Specialized.StringCollection();
+                            foreach (string dropPath in dropPaths) if (System.IO.File.Exists(dropPath) || System.IO.Directory.Exists(dropPath)) dropList.Add(dropPath);
+                            if (dropList.Count == 0) throw new Exception("no files");
+                            for (int dropTry = 0; ; dropTry++) // another program may hold the clipboard for a moment
+                            {
+                                try { Clipboard.SetFileDropList(dropList); break; }
+                                catch (System.Runtime.InteropServices.ExternalException) { if (dropTry >= 5) throw; Thread.Sleep(60); }
+                            }
+                        }, true);
+                        return;
                     case "frontFolder":
                         Async(c, delegate (Dictionary<string, object> r)
                         {
