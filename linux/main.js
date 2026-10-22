@@ -184,7 +184,7 @@ function start() {
     discovery.wantProbes = link.snapshot().link.state !== 'connected'; // probe every 10 s only while not connected
     pushState();
   });
-  clip = new Clip(link, () => settings.clipboard, pushState);
+  clip = new Clip(link, () => settings.clipboard, pushState, { selfId: device.id });
   screen = new Screen({
     link,
     clip,
@@ -262,7 +262,8 @@ function start() {
     else if (b.files) hud.show('driven', 'Received ' + b.files + ' file' + (b.files === 1 ? '' : 's') + ' from ' + peerName());
   };
   // Copy/paste files with shortcuts (the helper watches the keys), the file managers' Send to.
-  fileClip = new FileClip({ link, helper, fileDrop, fileRecv, settings, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
+  fileClip = new FileClip({ link, helper, fileDrop, fileRecv, settings, clip, peerName, popup: (kind, text) => hud.show(kind, text), onChange: pushState });
+  clip.fileClip = fileClip; // files copied normally, and received ones for the clipboard
   kvm.fileClip = fileClip; // our copy/paste shortcut while driving → fclip.key
   sendTo = new SendTo({ link, fileDrop, peerName: () => (peerView() || {}).name || '', popup: (kind, text, sub) => hud.show(kind, text, sub) });
   notifs = new Notifs({ link, helper, settings, save: saveSettings, peerName, onChange: pushState });
