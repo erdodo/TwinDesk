@@ -119,6 +119,7 @@ class Clip {
     const id = p.kind === 'files' ? io.sha(Buffer.from(p.paths.join('\n'))) : p.kind === 'image' ? io.sha(p.png) : undefined;
     const item = { kind: p.kind, stamp: this.latest.copied(p.kind, id), p, concealed: !!this.cfg.skipConcealed && isConcealed(), sent: false };
     this.item = item;
+    if (p.kind !== 'files' && this.fileClip) this.fileClip.retract();
     if (this.cfg.mode === 'instant') await this._send(item);
   }
 
