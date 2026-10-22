@@ -10,17 +10,40 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const { app, clipboard, nativeImage } = require('electron');
 const { EventEmitter } = require('events');
 const P = require('../shared/protocol.js');
 const { Latest, textMessage, imageMessage, readImage } = require('../shared/clipsync.js');
 const { ClipHistory } = require('../shared/clip-history.js');
+const { textKey, imageKey, filesKey, EchoGuard, Breaker } = require('../shared/clipguard.js');
 
 // Electron 44's clipboard.readText() returns a Promise in the main process (older: a string).
 const readText = async () => String((await clipboard.readText()) || '');
 const THUMB = 64; // width of an image's thumbnail in the Recent list
 const sha1 = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
+
+// What a clipboard item IS, never how the system stores it (format lists, PNG bytes, line breaks).
+// An image: its size and a sample of its raw pixels, whatever encoder made the PNG.
+function imageKeyOf(img) {
+  const { width, height } = img.getSize();
+  let bmp;
+  try { bmp = img.toBitmap(); } catch { bmp = img.toPNG(); }
+  const step = Math.max(1, Math.floor(bmp.length / 16384));
+  const sample = Buffer.alloc(Math.ceil(bmp.length / step) + 8);
+  let n = sample.writeUInt32BE(bmp.length >>> 0, 0);
+  for (let i = 0; i < bmp.length; i += step) sample[n++] = bmp[i];
+  return imageKey(width, height, sha1(sample.subarray(0, n)));
+}
+// Files: names and sizes (the paths differ between computers).
+function filesKeyOf(paths) {
+  return filesKey(paths.map((p) => {
+    let size = 0;
+    try { size = fs.statSync(p).size; } catch { /* gone: size 0 */ }
+    return { name: path.basename(p), size };
+  }));
+}
 
 class Clipboard extends EventEmitter {
   // historyDir: where the Recent list keeps images and files (default: the app's cache folder).
@@ -41,6 +64,9 @@ class Clipboard extends EventEmitter {
     this.hist.wipe(); // nothing from an earlier run stays on disk
     this.thumbs = new Map(); // history id -> thumbnail data URL
     this.lastSkip = '';
+    this.echo = new EchoGuard({ now: () => Date.now() }); // content we wrote or sent a moment ago
+    this.breaker = new Breaker({ now: () => Date.now() }); // copies faster than a person: pause
+    this.pausedLogged = false;
 
     server.on('client', () => {
       this.peerAccepts = true;
@@ -110,27 +136,44 @@ class Clipboard extends EventEmitter {
     const files = Array.isArray(ev.files) ? ev.files.filter((f) => typeof f === 'string' && f) : [];
     let item = null;
     if (files.length) {
-      item = { kind: 'files', sig: `f:${files.join('\n')}`, paths: files };
+      item = { kind: 'files', sig: filesKeyOf(files), paths: files };
     } else {
-      const text = ev.text ? await readText() : '';
-      if (text) {
-        item = { kind: 'text', sig: `t:${text}`, text };
-      } else if (ev.image) {
+      // A picture we wrote may gain a text format afterwards (a file name): still our picture.
+      let pic = null;
+      if (ev.image) {
         const img = clipboard.readImage();
         if (!img.isEmpty()) {
-          const png = img.toPNG();
-          const { width, height } = img.getSize();
-          item = { kind: 'image', sig: `i:${sha1(png)}`, w: width, h: height, bytes: png.length, png: png.length <= P.CLIP_IMAGE_MAX_BYTES ? png : null };
+          pic = img;
+          if (this.echo.isEcho(imageKeyOf(img))) return;
         }
+      }
+      const text = ev.text ? await readText() : '';
+      if (text) {
+        item = { kind: 'text', sig: textKey(text), text };
+      } else if (pic) {
+        const png = pic.toPNG();
+        const { width, height } = pic.getSize();
+        item = { kind: 'image', sig: imageKeyOf(pic), w: width, h: height, bytes: png.length, png: png.length <= P.CLIP_IMAGE_MAX_BYTES ? png : null };
       }
     }
     if (!item || item.sig === this.applied || (this.item && this.item.sig === item.sig)) return;
+    if (this.echo.isEcho(item.sig)) return; // the system touching what we wrote or sent: not a new copy
     this.applied = null;
     item.concealed = !!ev.concealed;
     item.sent = false;
+    if (!ev.initial && !this.breaker.hit()) { // faster than a person: a loop? remember it, stamp nothing
+      item.stamp = null;
+      this.item = item;
+      if (!this.pausedLogged) console.error('[clipboard] copies come in too fast: sync paused');
+      this.pausedLogged = true;
+      this.emit('change');
+      return;
+    }
+    this.pausedLogged = false;
     // What was there when watching began is of unknown age: never stamped, never sent.
-    item.stamp = ev.initial ? null : this.latest.copied(item.kind, item.kind === 'image' ? item.sig.slice(2) : undefined);
+    item.stamp = ev.initial ? null : this.latest.copied(item.kind, item.kind === 'image' ? item.sig : undefined);
     this.item = item;
+    if (item.stamp) this.echo.note(item.sig);
     if (item.stamp && item.kind !== 'files' && this.fileClip) this.fileClip.retractAuto(); // a newer copy: the files offered before are gone
     if (item.stamp && live && this.cfg.mode === 'instant') await this._send('instant');
   }
@@ -153,10 +196,11 @@ class Clipboard extends EventEmitter {
     if (!c.enabled || !c.receive || !P.clipAllowed(msg.text)) return;
     await this._poll();
     if (!this.latest.accept(msg, 'text')) return; // older than a copy we already know
-    const sig = `t:${msg.text}`;
+    const sig = textKey(msg.text);
     this.item = { kind: 'text', sig, text: msg.text, stamp: this._stampNow(), sent: true };
-    this.applied = sig;
-    if ((await readText()) !== msg.text) {
+    this.echo.note(sig);
+    if (textKey(await readText()) !== sig) { // the same content is already there: nothing to write
+      this.applied = sig;
       clipboard.writeText(msg.text);
       await this._wrote();
     }
@@ -177,12 +221,16 @@ class Clipboard extends EventEmitter {
     if (pic.isEmpty()) return;
     await this._poll();
     if (!this.latest.accept(msg, 'image', img.id)) return;
-    clipboard.writeImage(pic);
-    // The pasteboard re-encodes it: the signature of what it holds now is what we will see next.
-    const sig = `i:${sha1(clipboard.readImage().toPNG())}`;
+    const sig = imageKeyOf(pic);
+    const here = clipboard.readImage();
+    this.echo.note(sig);
+    if (here.isEmpty() || imageKeyOf(here) !== sig) { // the same picture is already there: nothing to write
+      clipboard.writeImage(pic);
+      this.applied = sig;
+      this.echo.note(imageKeyOf(clipboard.readImage())); // the pasteboard may hold it a little differently
+      await this._wrote();
+    }
     this.item = { kind: 'image', sig, w: img.w, h: img.h, png: null, stamp: this._stampNow(), sent: true };
-    this.applied = sig;
-    await this._wrote();
     this._remember({ kind: 'image', dir: 'in', png: img.png, w: img.w, h: img.h });
     this.emit('change');
   }
@@ -198,13 +246,17 @@ class Clipboard extends EventEmitter {
     await this._poll();
     const cur = this.latest.cur;
     if (!c.enabled || !c.receive || !c.files || !cur || cur.id !== id || !paths.length) return;
-    const sig = `f:${paths.join('\n')}`;
+    const sig = filesKeyOf(paths);
+    const same = this.item && this.item.kind === 'files' && this.item.sig === sig; // already on the clipboard
     this.item = { kind: 'files', sig, paths, stamp: this._stampNow(), sent: true };
-    this.applied = sig;
-    try {
-      this.ownCount = (await this.helper.request('clipboardFiles', { paths })).changeCount;
-    } catch (e) {
-      console.error(`[clipboard] files: ${e.message}`);
+    this.echo.note(sig);
+    if (!same) {
+      this.applied = sig;
+      try {
+        this.ownCount = (await this.helper.request('clipboardFiles', { paths })).changeCount;
+      } catch (e) {
+        console.error(`[clipboard] files: ${e.message}`);
+      }
     }
     this._remember({ kind: 'files', dir: 'in', files: paths.map((p) => ({ path: p })) });
     this.emit('change');
@@ -252,7 +304,7 @@ class Clipboard extends EventEmitter {
       if (!it.fromHistory) this._remember({ kind: 'text', dir: 'out', text: it.text });
     } else if (it.kind === 'image') {
       if (!c.images) return;
-      const msg = it.png && imageMessage({ id: it.sig.slice(2), w: it.w, h: it.h, png: it.png }, it.stamp);
+      const msg = it.png && imageMessage({ id: it.sig, w: it.w, h: it.h, png: it.png }, it.stamp);
       if (!msg) return this._skip(`skipped an image of ${Math.round(it.bytes / 1048576)} MB (over ${Math.round(P.CLIP_IMAGE_MAX_BYTES / 1048576)} MB)`);
       this.server.sendToClient(msg);
       if (!it.fromHistory) this._remember({ kind: 'image', dir: 'out', png: it.png, w: it.w, h: it.h });
@@ -282,31 +334,39 @@ class Clipboard extends EventEmitter {
     const c = this.hist.content(String(id));
     if (!c) return;
     await this._poll(); // a copy made just now is stamped before this one
+    if (!this.breaker.hit()) return; // a person never gets here that fast
     let item;
     if (c.kind === 'text') {
+      item = { kind: 'text', sig: textKey(c.text), text: c.text };
+      this.echo.note(item.sig);
+      this.applied = item.sig;
       clipboard.writeText(c.text);
-      item = { kind: 'text', sig: `t:${c.text}`, text: c.text };
       await this._wrote();
     } else if (c.kind === 'image') {
       const pic = nativeImage.createFromBuffer(c.png);
       if (pic.isEmpty()) return;
+      const sig = imageKeyOf(pic);
+      this.echo.note(sig);
+      this.applied = sig;
       clipboard.writeImage(pic);
-      const sig = `i:${sha1(clipboard.readImage().toPNG())}`; // the pasteboard re-encodes it
+      this.echo.note(imageKeyOf(clipboard.readImage())); // the pasteboard may hold it a little differently
       item = { kind: 'image', sig, w: c.w, h: c.h, bytes: c.png.length, png: c.png.length <= P.CLIP_IMAGE_MAX_BYTES ? c.png : null };
       await this._wrote();
     } else {
+      this.echo.note(filesKeyOf(c.paths));
       try {
         this.ownCount = (await this.helper.request('clipboardFiles', { paths: c.paths })).changeCount;
       } catch (e) {
         return console.error(`[clipboard] files: ${e.message}`);
       }
-      item = { kind: 'files', sig: `f:${c.paths.join('\n')}`, paths: c.paths };
+      item = { kind: 'files', sig: filesKeyOf(c.paths), paths: c.paths };
     }
     this.applied = item.sig; // the watcher reports our own write: not a second copy
+    this.echo.note(item.sig);
     item.concealed = false;
     item.sent = false;
     item.fromHistory = true; // already in the list
-    item.stamp = this.latest.copied(item.kind, item.kind === 'image' ? item.sig.slice(2) : undefined);
+    item.stamp = this.latest.copied(item.kind, item.kind === 'image' ? item.sig : undefined);
     this.item = item;
     if (item.kind !== 'files' && this.fileClip) this.fileClip.retractAuto();
     if (this.cfg.mode === 'instant') await this._send('instant');
@@ -347,6 +407,8 @@ class Clipboard extends EventEmitter {
     return {
       peerAccepts: this.peerAccepts,
       lastSkip: this.lastSkip,
+      paused: this.breaker.paused,
+      pausedUntil: this.breaker.paused ? this.breaker.until : 0,
       history: history.map((h) => (h.kind === 'image' && h.kept ? { ...h, thumb: this._thumb(h.id) } : h)),
     };
   }
