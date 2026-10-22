@@ -52,7 +52,7 @@ const SCHEMA = {
   mount: { on: bool },
   clipboard: {
     enabled: bool, send: bool, receive: bool, mode: oneOf(['switch', 'instant'], 'instant'),
-    skipConcealed: bool, maxKB: oneOf([16, 64, 256], 256), historySize: (v) => Math.round(clamp(0, 100, 20)(v)),
+    skipConcealed: bool, maxKB: oneOf([16, 64, 256], 256), images: bool, files: bool, filesMaxMB: oneOf([10, 50, 200, 500, 1000], 50), historySize: (v) => Math.round(clamp(0, 100, 20)(v)),
   },
 };
 

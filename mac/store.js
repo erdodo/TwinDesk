@@ -70,6 +70,9 @@ const DEFAULT_SETTINGS = {
     mode: 'instant', // 'instant' (whenever you copy, the default) | 'switch' (Monitor 2 focus, crossing)
     skipConcealed: true, // passwords from password managers
     maxKB: 256,
+    images: true, // images on the clipboard (PNG, up to 8 MB)
+    files: true, // files copied in Finder: sent at once when small enough, else the paste shortcut
+    filesMaxMB: 50,
     historySize: 20, // memory only
   },
   // setupSkipped: the missing items when Setup was skipped; setupDone: Setup has been through once
