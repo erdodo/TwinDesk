@@ -33,16 +33,31 @@ class VirtualCam {
     this.idle = null;
     this.wasReady = false;
     this.sources = new Set(); // the camera windows' webContents
+    this.activeSource = null; // in multi-phone mesh, the camera window feeding the virtual camera
     this.lastPreview = 0;
     const { ipcMain } = require('electron');
-    ipcMain.on('vcam:frame', (_e, buf) => this.frame(buf));
+    ipcMain.on('vcam:frame', (e, buf) => {
+      if (this.activeSource && e.sender !== this.activeSource) return;
+      this.frame(buf);
+    });
     ipcMain.on('vcam:hello', (e) => {
       const wc = e.sender;
       this.sources.add(wc);
-      wc.once('destroyed', () => this.sources.delete(wc));
+      if (!this.activeSource) this.activeSource = wc;
+      if (wc && typeof wc.once === 'function') {
+        wc.once('destroyed', () => {
+          this.sources.delete(wc);
+          if (this.activeSource === wc) {
+            this.activeSource = this.sources.values().next().value || null;
+            this._tellAll();
+            this.onChange();
+          }
+        });
+      }
       this._tell(wc);
     });
-    ipcMain.on('vcam:preview', (_e, buf) => {
+    ipcMain.on('vcam:preview', (e, buf) => {
+      if (this.activeSource && e.sender !== this.activeSource) return;
       const w = this.ui();
       if (!buf || buf.byteLength > 2e6) return;
       const was = this.lastPreview;
@@ -67,8 +82,18 @@ class VirtualCam {
     this.onChange();
   }
 
+  setActiveSource(wc) {
+    if (this.activeSource === wc) return;
+    this.activeSource = wc;
+    this._tellAll();
+    this.onChange();
+  }
+
   _tell(wc) {
-    if (!wc.isDestroyed()) wc.send('vcam:set', { vcam: this.ready, rotate: this.rotate });
+    if (wc && (typeof wc.isDestroyed !== 'function' || !wc.isDestroyed()) && typeof wc.send === 'function') {
+      const active = !this.activeSource || this.activeSource === wc;
+      wc.send('vcam:set', { vcam: this.ready && active, rotate: this.rotate });
+    }
   }
 
   _tellAll() {
@@ -228,6 +253,7 @@ class VirtualCam {
       live: this.ready && Date.now() - this.lastFrame < LIVE_MS, // the virtual camera gets frames
       picture: Date.now() - this.lastPreview < LIVE_MS, // the tab gets its picture
       rotate: this.rotate,
+      activeSourceId: this.activeSource && typeof this.activeSource.id === 'number' ? this.activeSource.id : null,
     };
   }
 

@@ -241,6 +241,8 @@ function publishState() {
       state.papps = { ...settings.papps, ...svc.pcApps.view };
     }
     if (svc) state.wake = svc.wake.view;
+    state.camera = { on: !!(settings.camera && settings.camera.on) };
+    state.vcam = svc && svc.vcam ? svc.vcam.view() : { checked: true, supported: true, on: false };
     if (svc && svc.phone) state.phone = { ...svc.phone.view, settings: settings.phone };
     if (svc && svc.net) {
       const c = peer && peer.current;
@@ -563,6 +565,7 @@ app.whenReady().then(() => {
       ph.wired = svc.wired;
       bridge.wired = svc.wired;
       const views = new PhoneViews({ bridge, phone: ph, getSettings: () => settings, server: scoped, fileSend: svc.fileSend });
+      if (svc.vcam) views.vcam = svc.vcam;
       return { phone: ph, bridge, views };
     },
     onUnit: (u) => {
@@ -588,6 +591,55 @@ app.whenReady().then(() => {
   svc.kvm.attachLocal(svc.phone);
   setupNet();
   setupHub();
+  // Camera: the phone camera's picture to the window/preview and virtual camera (shared/vcam.js).
+  function loadCamera() {
+    if (svc.vcam || !settings.camera || !settings.camera.on) return svc.vcam;
+    const { VirtualCam } = require('../../shared/vcam.js');
+    svc.vcam = new VirtualCam({
+      driver: require('../vcam'),
+      cfg: () => settings.camera,
+      save: () => store.saveSettings(settings),
+      onChange: pushState,
+      onReady: () => {
+        if (svc.phone && svc.phone.all) {
+          for (const u of svc.phone.all) if (u.bridge) u.bridge._tellPhone();
+        } else if (svc.phone && svc.phone.bridge) {
+          svc.phone.bridge._tellPhone();
+        }
+      },
+      ui: () => win,
+    });
+    if (svc.phone && svc.phone.all) {
+      for (const u of svc.phone.all) if (u.views) u.views.vcam = svc.vcam;
+    }
+    svc.vcam.check();
+    return svc.vcam;
+  }
+
+  function setCamera(on) {
+    if (!settings.camera) settings.camera = { on: false };
+    settings.camera.on = !!on;
+    store.saveSettings(settings);
+    if (settings.camera.on) {
+      loadCamera();
+      if (svc.vcam) svc.vcam.check();
+    } else {
+      if (svc.vcam) svc.vcam.stop();
+      if (svc.phone && svc.phone.all) {
+        for (const u of svc.phone.all) {
+          if (u.views) {
+            for (const v of u.views.list()) if (v.kind === 'camera') u.views.close(v.id);
+          }
+        }
+      }
+    }
+    pushState();
+  }
+
+  svc.loadCamera = loadCamera;
+  svc.setCamera = setCamera;
+  if (settings.camera && settings.camera.on) loadCamera();
+
   const blockEdge = svc.kvm.blockEdge;
   svc.kvm.blockEdge = () => blockEdge() || svc.phone.focused; // moving inside the phone window never crosses
   svc.apps.setSharing = (on, by) => actions.setSharing(on, by);
@@ -838,6 +890,7 @@ app.on('will-quit', () => {
 });
 app.on('before-quit', () => {
   quitting = true;
+  if (svc && svc.vcam) svc.vcam.stop();
   if (svc && svc.phone) svc.phone.shutdown();
   if (svc && svc.phoneDrive) svc.phoneDrive.shutdown();
   if (svc && svc.wired) svc.wired.stop();
