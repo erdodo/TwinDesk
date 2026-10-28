@@ -231,6 +231,13 @@ class PhoneSet extends EventEmitter {
     this.emit('change');
   }
 
+  closeView(id) {
+    id = Number(id);
+    for (const u of this.all) {
+      if (u.views && u.views.views.has(id)) return u.views.close(id);
+    }
+  }
+
   shutdown() {
     for (const u of this.all) if (u.views) u.views.shutdown();
   }
@@ -249,6 +256,10 @@ class PhoneSet extends EventEmitter {
       // Every phone connected now, each with how its adb connection is doing.
       phones: this.all.filter((u) => u.link.current).map((u) => ({
         id: u.link.current.deviceId, name: u.link.current.name, usb: !!u.link.current.ice, state: u.bridge.state, via: u.bridge.via,
+        rttMs: u.link.current.rttMs, // each phone's own link, battery and colours (the sidebar tiles)
+        battery: u.phone.info ? u.phone.info.battery : null, charging: !!(u.phone.info && u.phone.info.charging),
+        colors: u.phone.info && u.phone.info.colors && u.phone.info.colors.length ? u.phone.info.colors : null,
+        camera: u.views && typeof u.views.cameraState === 'function' ? u.views.cameraState() : null,
       })),
     };
   }
