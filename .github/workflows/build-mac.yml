@@ -76,9 +76,7 @@ jobs:
       - name: Build the disk image
         working-directory: mac
         run: |
-          npm run dmg
-          v=$(node -p "require('./package.json').version")
-          mv dist/TwinDesk-Mesh.dmg "dist/TwinDesk-Mesh-$v-arm64.dmg"
+          npm run dmg # dist/TwinDesk-<version>-arm64.dmg, named by build-dmg.sh
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v4
