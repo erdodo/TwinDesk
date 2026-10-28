@@ -94,7 +94,7 @@
         else if (!anyOn) text = 'Press Start to run a camera here';
         said.textContent = text;
         said.hidden = !text;
-        img.hidden = !anyOn || !text;
+        img.hidden = !anyOn || !!text;
         if (!anyOn && url) {
           URL.revokeObjectURL(url);
           url = '';
