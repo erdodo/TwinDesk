@@ -150,6 +150,41 @@ function fakeDriver({ installed = false, fail = '' } = {}) {
     ipcMain.removeAllListeners('vcam:frame');
   }
 
+  // Preview forwarding to ui with sender webContents id (backward-compatible)
+  {
+    const sent = [];
+    const uiWin = {
+      isDestroyed: () => false,
+      isVisible: () => true,
+      webContents: {
+        send: (ev, ...args) => {
+          if (ev === 'vcam:preview') sent.push(args);
+        },
+      },
+    };
+    const v = new VirtualCam({ driver: null, cfg: () => ({}), save: () => {}, onChange: () => {}, ui: () => uiWin });
+    const s1 = { id: 101 };
+    const s2 = { id: 102 };
+    const buf1 = Buffer.from('frame1');
+    const buf2 = Buffer.from('frame2');
+    ipcMain.emit('vcam:preview', { sender: s1 }, buf1);
+    ipcMain.emit('vcam:preview', { sender: s2 }, buf2);
+    assert.strictEqual(sent.length, 2);
+    assert.strictEqual(sent[0][0], buf1);
+    assert.strictEqual(sent[0][1], 101);
+    assert.strictEqual(sent[1][0], buf2);
+    assert.strictEqual(sent[1][1], 102);
+
+    // Single-arg listener (one-to-one legacy caller)
+    let legacyBuf = null;
+    const legacyListener = (b) => { legacyBuf = b; };
+    legacyListener(...sent[0]);
+    assert.strictEqual(legacyBuf, buf1);
+
+    v.stop();
+    ipcMain.removeAllListeners('vcam:preview');
+  }
+
   console.log('vcam: passed');
   process.exit(0);
 })().catch((e) => {

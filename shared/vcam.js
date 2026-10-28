@@ -57,7 +57,6 @@ class VirtualCam {
       this._tell(wc);
     });
     ipcMain.on('vcam:preview', (e, buf) => {
-      if (this.activeSource && e.sender !== this.activeSource) return;
       const w = this.ui();
       if (!buf || buf.byteLength > 2e6) return;
       const was = this.lastPreview;
@@ -65,7 +64,8 @@ class VirtualCam {
       if (this.lastPreview - was > LIVE_MS) this.onChange(); // the tab's picture came
       clearTimeout(this.pictureTimer);
       this.pictureTimer = setTimeout(() => this.onChange(), LIVE_MS + 100); // …or stopped
-      if (w && !w.isDestroyed() && w.isVisible()) w.webContents.send('vcam:preview', buf);
+      const senderId = e && e.sender ? e.sender.id : undefined;
+      if (w && !w.isDestroyed() && w.isVisible()) w.webContents.send('vcam:preview', buf, senderId);
     });
   }
 
@@ -258,6 +258,7 @@ class VirtualCam {
   }
 
   stop() {
+    clearTimeout(this.pictureTimer);
     this._stopFeed();
   }
 }

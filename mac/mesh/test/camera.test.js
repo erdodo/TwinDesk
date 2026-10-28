@@ -180,13 +180,22 @@ function makeMockAdb(port) {
     const driver = fakeDriver();
     const cfg = { virtual: true, rotate: 0 };
     let changes = 0;
+    const sentPreviews = [];
     const vcam = new VirtualCam({
       driver,
       cfg: () => cfg,
       save: () => {},
       onChange: () => { changes++; },
       onReady: () => {},
-      ui: () => ({ isDestroyed: () => false, isVisible: () => true, webContents: { send: () => {} } }),
+      ui: () => ({
+        isDestroyed: () => false,
+        isVisible: () => true,
+        webContents: {
+          send: (ev, ...args) => {
+            if (ev === 'vcam:preview') sentPreviews.push(args);
+          },
+        },
+      }),
     });
     await vcam.check();
     await vcam.setOn(true);
@@ -212,6 +221,23 @@ function makeMockAdb(port) {
     ipcMain.emit('vcam:hello', { sender: wc2 });
     assert.strictEqual(vcam.activeSource, wc1, 'active source unchanged when second joins');
     assert.strictEqual(wc2Messages[0].msg.vcam, false, 'second source gets vcam: false');
+
+    // Previews from two camera windows both reach the control window with different wcIds
+    const p1 = Buffer.from('preview-phone-1');
+    const p2 = Buffer.from('preview-phone-2');
+    ipcMain.emit('vcam:preview', { sender: wc1 }, p1);
+    ipcMain.emit('vcam:preview', { sender: wc2 }, p2);
+    assert.strictEqual(sentPreviews.length, 2, 'previews from both sources reach control window');
+    assert.strictEqual(sentPreviews[0][0], p1);
+    assert.strictEqual(sentPreviews[0][1], 101, 'first preview has sender wc1 id');
+    assert.strictEqual(sentPreviews[1][0], p2);
+    assert.strictEqual(sentPreviews[1][1], 102, 'second preview has sender wc2 id');
+
+    // One-to-one style single-arg listener still works
+    let receivedSingleArg = null;
+    const oldStyleListener = (buf) => { receivedSingleArg = buf; };
+    oldStyleListener(...sentPreviews[0]);
+    assert.strictEqual(receivedSingleArg, p1, 'single-arg listener receives buffer normally');
 
     // Frames from wc2 are dropped; frames from wc1 are accepted
     ipcMain.emit('vcam:frame', { sender: wc2 }, new ArrayBuffer(FRAME));
@@ -267,13 +293,13 @@ function makeMockAdb(port) {
       ]),
       route(pick) {
         const r = new EventEmitter();
-        Object.assign(r, {
-          get current() {
+        r.send = () => true;
+        r.refresh = () => {};
+        Object.defineProperty(r, 'current', {
+          get() {
             const id = pick(hub);
             return id ? hub.sessions.get(id) || null : null;
           },
-          send: () => true,
-          refresh: () => {},
         });
         return r;
       },
@@ -329,16 +355,23 @@ function makeMockAdb(port) {
     assert.strictEqual(c1.on, true);
     assert.strictEqual(c1.facing, 'back');
     assert.strictEqual(c1.virtualActive, true, 'phone 1 is first and active');
+    assert.ok(typeof c1.wcId === 'number' && c1.wcId > 0, 'c1 exposes camera window wcId');
 
     // Open camera on phone 2
     u2.views.openCamera({ facing: 'front' });
     const c2 = u2.views.cameraState();
     assert.strictEqual(c2.on, true);
     assert.strictEqual(c2.facing, 'front');
+    assert.ok(typeof c2.wcId === 'number' && c2.wcId > 0, 'c2 exposes camera window wcId');
+    assert.notStrictEqual(c1.wcId, c2.wcId, 'c1 and c2 have distinct wcIds');
 
-    // PhoneSet view contains per-phone camera state
+    // PhoneSet view contains per-phone camera state including wcId
     const setView = set.view;
     assert.ok(setView.phones.every((p) => p.camera != null), 'every phone in view has camera state');
+    const p1 = setView.phones.find((p) => p.id === 'phone-1');
+    const p2 = setView.phones.find((p) => p.id === 'phone-2');
+    assert.strictEqual(p1.camera.wcId, c1.wcId, 'phone 1 camera exposes wcId in phones view');
+    assert.strictEqual(p2.camera.wcId, c2.wcId, 'phone 2 camera exposes wcId in phones view');
 
     // Test closeView across units
     const v2 = [...u2.views.views.values()][0];
@@ -440,6 +473,14 @@ function makeMockAdb(port) {
     const phoneUi = fs.readFileSync(path.resolve(__dirname, '../ui-phone.js'), 'utf8');
     assert.ok(!phoneUi.includes('camCard'), 'camCard removed from ui-phone.js');
     assert.ok(phoneUi.includes("UI.go('camera')"), 'ui-phone.js contains link to camera page');
+
+    // Verify ui-camera.js contains multi-preview grid and caption
+    const camUi = fs.readFileSync(path.resolve(__dirname, '../ui-camera.js'), 'utf8');
+    // The page is a plain script in the renderer: a syntax error there never shows in the other tests.
+    assert.doesNotThrow(() => new (require('vm').Script)(camUi, { filename: 'ui-camera.js' }), 'ui-camera.js parses');
+    assert.ok(camUi.includes('phone-cam-grid'), 'ui-camera.js contains multi-preview grid');
+    assert.ok(camUi.includes('phone-cam-previews'), 'ui-camera.js contains preview container');
+    assert.ok(camUi.includes('Feeds Virtual Camera'), 'ui-camera.js labels the active source');
   }
 
   mockAdbServer.close();

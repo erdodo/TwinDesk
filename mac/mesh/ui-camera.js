@@ -27,37 +27,64 @@
       const { api, el } = UI;
       const cam = (m) => api.camera(m);
 
-      // The picture: what the camera's window sends (a JPEG, about 12 a second). A click opens the window.
-      const img = el('img', { alt: '' });
-      Object.assign(img.style, { width: '100%', height: '100%', objectFit: 'contain', display: 'block' });
-      const said = el('div');
-      Object.assign(said.style, { position: 'absolute', inset: '0', display: 'grid', placeItems: 'center', textAlign: 'center', padding: '0 24px', color: '#a1a1a6' });
-      const box = el('div', { title: 'Open it in a window', class: 'phone-cam-preview' }, [img, said]);
-      Object.assign(box.style, { position: 'relative', aspectRatio: '16 / 9', background: '#000', borderRadius: '8px', overflow: 'hidden', cursor: 'pointer', margin: '12px 14px' });
+      // The previews: per-phone preview tile for each running camera, or empty state
+      const previewArea = el('div', { class: 'phone-cam-previews' });
+      Object.assign(previewArea.style, { margin: '12px 14px' });
 
-      box.onclick = () => {
-        if (!cur) return;
-        const phones = getPhones(cur);
-        const active = phones.find((p) => p.camera && p.camera.virtualActive) || phones.find((p) => p.camera && p.camera.on);
-        if (active) {
-          const facing = (active.camera && active.camera.facing) || phoneFacing.get(active.id) || 'back';
-          api.phoneCamera(true, { facing, show: true, id: active.id });
+      const emptySaid = el('div');
+      Object.assign(emptySaid.style, { position: 'absolute', inset: '0', display: 'grid', placeItems: 'center', textAlign: 'center', padding: '0 24px', color: '#a1a1a6' });
+      const emptyBox = el('div', { class: 'phone-cam-preview empty' }, [emptySaid]);
+      Object.assign(emptyBox.style, { position: 'relative', aspectRatio: '16 / 9', background: '#000', borderRadius: '8px', overflow: 'hidden' });
+
+      const grid = el('div', { class: 'phone-cam-grid' });
+      Object.assign(grid.style, {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+        gap: '12px',
+      });
+      grid.hidden = true;
+
+      previewArea.append(emptyBox, grid);
+
+      // Map phoneId -> { phoneId, wcId, box, img, caption, url }
+      const tiles = new Map();
+
+      function disposeTile(tile) {
+        if (tile.url) {
+          URL.revokeObjectURL(tile.url);
+          tile.url = '';
         }
-      };
+        tile.img.removeAttribute('src');
+      }
 
-      let url = '';
       if (api.onCamPreview) {
-        api.onCamPreview((buf) => {
+        api.onCamPreview((buf, wcId) => {
           if (!cur || !running(cur)) return;
+          let tile = null;
+          if (wcId != null) {
+            tile = [...tiles.values()].find((t) => t.wcId === wcId);
+          }
+          if (!tile && tiles.size === 1) {
+            tile = tiles.values().next().value;
+          }
+          if (!tile) return;
+
           const next = URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' }));
-          img.onload = () => { if (url && url !== next) URL.revokeObjectURL(url); url = next; };
-          img.src = next;
+          const prev = tile.url;
+          tile.img.onload = () => {
+            if (prev && prev !== next) URL.revokeObjectURL(prev);
+          };
+          tile.img.onerror = () => {
+            URL.revokeObjectURL(next);
+          };
+          tile.url = next;
+          tile.img.src = next;
         });
       }
 
       // Multi-phone camera rows
       const phoneRows = el('div', { class: 'phone-cam-rows' });
-      const picCard = UI.card('', [box, phoneRows]);
+      const picCard = UI.card('', [previewArea, phoneRows]);
 
       // Virtual camera: the picture also goes to a camera other apps can pick.
       const virtual = UI.switch((v) => cam({ do: 'virtual', on: v }), { label: 'Virtual camera' });
@@ -84,21 +111,89 @@
         const c = s.camera || {};
         const v = s.vcam || {};
         const phones = getPhones(s);
-        const anyOn = running(s);
+        const runningPhones = phones.filter((p) => p.camera && p.camera.on);
+        const anyOn = runningPhones.length > 0;
         const vName = `“${v.name || 'TwinDesk Camera'}”`;
 
-        // The picture, or why it isn't running
-        let text = '';
-        if (!c.on) text = 'Off: turn on Camera at the top';
-        else if (!phones.length) text = 'No phone connected: connect a phone to use its camera';
-        else if (!anyOn) text = 'Press Start to run a camera here';
-        said.textContent = text;
-        said.hidden = !text;
-        img.hidden = !anyOn || !!text;
-        if (!anyOn && url) {
-          URL.revokeObjectURL(url);
-          url = '';
-          img.removeAttribute('src');
+        // Previews: per-running-phone tiles or the empty message box
+        if (!anyOn) {
+          for (const tile of tiles.values()) disposeTile(tile);
+          tiles.clear();
+          grid.replaceChildren();
+          grid.hidden = true;
+          emptyBox.hidden = false;
+
+          let text = '';
+          if (!c.on) text = 'Off: turn on Camera at the top';
+          else if (!phones.length) text = 'No phone connected: connect a phone to use its camera';
+          else text = 'Press Start to run a camera here';
+          emptySaid.textContent = text;
+        } else {
+          emptyBox.hidden = true;
+          grid.hidden = false;
+
+          // Clean up tiles for phones no longer running camera
+          const runningIds = new Set(runningPhones.map((p) => p.id));
+          for (const [id, tile] of tiles.entries()) {
+            if (!runningIds.has(id)) {
+              disposeTile(tile);
+              tiles.delete(id);
+            }
+          }
+
+          // Build or update tile per running phone
+          const tileElements = [];
+          for (const p of runningPhones) {
+            let tile = tiles.get(p.id);
+            if (!tile) {
+              const img = el('img', { alt: '' });
+              Object.assign(img.style, { width: '100%', height: '100%', objectFit: 'contain', display: 'block' });
+
+              const caption = el('div', { class: 'phone-cam-caption' });
+              Object.assign(caption.style, {
+                position: 'absolute',
+                bottom: '0',
+                left: '0',
+                right: '0',
+                padding: '6px 10px',
+                background: 'linear-gradient(transparent, rgba(0, 0, 0, 0.75))',
+                color: '#fff',
+                fontSize: '12px',
+                fontWeight: '500',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                pointerEvents: 'none',
+              });
+
+              const box = el('div', { class: 'phone-cam-preview' }, [img, caption]);
+              Object.assign(box.style, {
+                position: 'relative',
+                aspectRatio: '16 / 9',
+                background: '#000',
+                borderRadius: '8px',
+                overflow: 'hidden',
+                cursor: 'pointer',
+              });
+
+              box.onclick = () => {
+                if (!cur) return;
+                const currPhone = getPhones(cur).find((x) => x.id === p.id);
+                const facing = (currPhone && currPhone.camera && currPhone.camera.facing) || phoneFacing.get(p.id) || 'back';
+                api.phoneCamera(true, { facing, show: true, id: p.id });
+              };
+
+              tile = { phoneId: p.id, wcId: p.camera && p.camera.wcId, box, img, caption, url: '' };
+              tiles.set(p.id, tile);
+            }
+
+            tile.wcId = p.camera && p.camera.wcId;
+            tile.box.title = `Open ${p.name}’s camera in a window`;
+            const isVirtual = !!(p.camera && p.camera.virtualActive);
+            tile.caption.textContent = p.name + (isVirtual ? ' · Feeds Virtual Camera' : '');
+            tileElements.push(tile.box);
+          }
+          grid.replaceChildren(...tileElements);
         }
 
         // Build / update per-phone rows
@@ -184,7 +279,6 @@
         }
 
         // Which phone feeds the virtual camera
-        const runningPhones = phones.filter((p) => p.camera && p.camera.on);
         if (runningPhones.length > 1) {
           sourceRow.hidden = false;
           sourceSelect.options(runningPhones.map((p) => ({ value: p.id, label: p.name + (p.camera.virtualActive ? ' (Active)' : '') })));
