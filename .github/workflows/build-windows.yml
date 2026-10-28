@@ -1,41 +1,74 @@
 name: Build Windows
 
+# release.yml calls this for pull requests and merges to mesh (version, code and release_tag set).
+# Pushing a v* tag, or running it by hand with a tag, builds that ref and puts the files on that release.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      code:
+        type: string
+        default: ''
+      release_tag:
+        type: string
+        default: ''
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Release to put the files on (e.g. v2.0.1; made as a draft if it isn't there). Empty = run artifacts only.
+        description: Release to put the files on (e.g. v2.1.0). Empty = run artifacts only.
         required: false
         default: ''
       ref:
-        description: Branch to build (a test branch; releases come from main).
+        description: Branch to build (a test branch; releases come from mesh).
         required: false
-        default: main
+        default: mesh
       virustotal:
         description: Scan the installers on VirusTotal (needs the VT_API_KEY secret; uploads are shared with its partners)
         type: boolean
         required: false
         default: false
 
-# Write: the full Android APK can come from a draft release, which a read-only token can't see.
+# Write: the full Android APK can come from an existing release when no signing secret is present.
 permissions:
   contents: write
 
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || inputs.tag }}
 
     steps:
-      # main unless another branch is asked for (ref), whichever branch the run was started from.
+      # Build the pushed tag or branch, or the ref selected for a manual run.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'main' }}
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set the version
+        if: inputs.version != ''
+        shell: bash
+        run: bash .github/scripts/set-version.sh "${{ inputs.version }}" "${{ inputs.code }}"
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - uses: ./.github/actions/android-full
+      # The full APK of this run's Android build; tag and manual builds take the one on a release.
+      # Test builds from pull requests run in parallel and may not bundle the full Android APK.
+      - name: Full Android APK from this run
+        if: inputs.version != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: android-full-apk
+          path: android/dist
+
+      - if: inputs.version == ''
+        uses: ./.github/actions/android-full
         with:
           keystore: ${{ secrets.ANDROID_KEYSTORE }}
 
@@ -57,7 +90,7 @@ jobs:
 
       # The helper builds with .NET Framework's csc.exe, which the runner has. One AnyCPU helper
       # serves both installers.
-      - name: Build the installers (x64 and arm64)
+      - name: Build the installer (x64)
         working-directory: windows
         run: npm run dist -- x64 arm64
         env:
@@ -69,26 +102,20 @@ jobs:
       - name: Upload the x64 installer
         uses: actions/upload-artifact@v4
         with:
-          name: twindesk-windows-x64
+          name: twindesk-mesh-windows-x64
           path: |
             windows/dist/*.exe
-            !windows/dist/*-arm64.exe
-
-      - name: Upload the arm64 installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: twindesk-windows-arm64
-          path: windows/dist/*-arm64.exe
 
       # Straight onto the release, no download and re-upload.
       - name: Upload to the release
-        if: inputs.tag != ''
+        if: env.RELEASE_TAG != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ inputs.tag }}" >/dev/null 2>&1 || gh release create "${{ inputs.tag }}" --draft --target main --title "${{ inputs.tag }}" --notes "" || true
-          gh release upload "${{ inputs.tag }}" windows/dist/*.exe --clobber
+          TAG="$RELEASE_TAG"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes --latest || true
+          gh release upload "$TAG" windows/dist/*.exe --clobber
 
   # The installers uploaded to VirusTotal and scanned: what each engine said goes in the run's
   # summary, with the link to the full report. VT_API_KEY: a free VirusTotal account's API key.

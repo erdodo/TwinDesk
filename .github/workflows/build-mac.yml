@@ -1,128 +1,96 @@
-name: Build macOS
+name: Build Mac
 
+# release.yml calls this for pull requests and merges to mesh (version, code and release_tag set).
+# Pushing a v* tag, or running it by hand with a tag, builds that ref and puts the files on that release.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      code:
+        type: string
+        default: ''
+      release_tag:
+        type: string
+        default: ''
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Release to put the files on (e.g. v2.0.1; made as a draft if it isn't there). Empty = run artifacts only.
+        description: Release to put the files on (e.g. v2.1.0). Empty = run artifacts only.
         required: false
         default: ''
-      ref:
-        description: Branch to build (a test branch; releases come from main).
-        required: false
-        default: main
 
-# Write: draft releases and release asset uploads require write permissions.
+# Write: the full Android APK can come from an existing release when no signing secret is present.
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: macos-latest
+    # Apple Silicon: the .dmg is for arm64 Macs.
+    runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || inputs.tag }}
 
     steps:
-      # main unless another branch is asked for (ref), whichever branch the run was started from.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'main' }}
+          ref: ${{ github.ref }}
+
+      - name: Set the version
+        if: inputs.version != ''
+        run: bash .github/scripts/set-version.sh "${{ inputs.version }}" "${{ inputs.code }}"
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - uses: actions/setup-python@v5
+      # The full APK of this run's Android build; tag and manual builds take the one on a release.
+      # Test builds from pull requests run in parallel and may not bundle the full Android APK.
+      - name: Full Android APK from this run
+        if: inputs.version != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
         with:
-          python-version: '3.x'
+          name: android-full-apk
+          path: android/dist
 
-      - uses: ./.github/actions/android-full
+      - if: inputs.version == ''
+        uses: ./.github/actions/android-full
         with:
           keystore: ${{ secrets.ANDROID_KEYSTORE }}
-
-      - name: Configure Developer ID certificate (if secret provided)
-        id: signing-setup
-        env:
-          DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
-          DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-        run: |
-          if [ -n "$DEVELOPER_ID_CERTIFICATE_BASE64" ]; then
-            KEYCHAIN_PATH="${RUNNER_TEMP}/twindesk-signing.keychain-db"
-            KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-            CERT_PATH="${RUNNER_TEMP}/certificate.p12"
-
-            echo "$DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$CERT_PATH"
-            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-            existing_keychains=()
-            while IFS= read -r kc; do
-              existing_keychains+=("${kc//\"/}")
-            done < <(security list-keychains -d user)
-            security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing_keychains[@]}"
-
-            security import "$CERT_PATH" \
-              -k "$KEYCHAIN_PATH" \
-              -P "${DEVELOPER_ID_CERTIFICATE_PASSWORD:-}" \
-              -T /usr/bin/codesign \
-              -T /usr/bin/security
-            security set-key-partition-list \
-              -S apple-tool:,apple:,codesign: \
-              -s \
-              -k "$KEYCHAIN_PASSWORD" \
-              "$KEYCHAIN_PATH"
-
-            ID="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk '/Developer ID Application/ && !id {id=$2} END {print id}')"
-            rm -f "$CERT_PATH"
-            if [ -n "$ID" ]; then
-              echo "MAC_IDENTITY=$ID" >> "$GITHUB_ENV"
-              echo "SIGNING_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-              echo "Configured Developer ID signing identity: $ID"
-            fi
-          fi
 
       - name: Install dependencies
         working-directory: mac
         run: npm install
 
-      - name: Build macOS app and disk image
+      # swiftc builds the helper; the app is signed with a self-signed certificate made on this runner
+      # (mac/scripts/signing-identity.sh), so macOS asks for Screen Recording, Accessibility and Input
+      # Monitoring again after every update from CI. adb comes from mac/scripts/fetch-adb.sh.
+      - name: Build TwinDesk Mesh.app
         working-directory: mac
-        # Camera › Virtual camera's extension (build-app.sh) only with the two provisioning profiles
-        # that allow system extensions (base64 secrets); without them the app is built without it.
+        run: npm run dist
+
+      - name: Build the disk image
+        working-directory: mac
         run: |
-          if [ -n "$MAC_APP_PROFILE_BASE64" ] && [ -n "$MAC_CAMERA_PROFILE_BASE64" ]; then
-            echo "$MAC_APP_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/app.provisionprofile"
-            echo "$MAC_CAMERA_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/camera.provisionprofile"
-            export MAC_APP_PROFILE="$RUNNER_TEMP/app.provisionprofile" MAC_CAMERA_PROFILE="$RUNNER_TEMP/camera.provisionprofile"
-          fi
-          npm run dist
           npm run dmg
-        env:
-          MAC_APP_PROFILE_BASE64: ${{ secrets.MAC_APP_PROFILE_BASE64 }}
-          MAC_CAMERA_PROFILE_BASE64: ${{ secrets.MAC_CAMERA_PROFILE_BASE64 }}
-          MAC_IDENTITY: ${{ env.MAC_IDENTITY || secrets.MAC_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          v=$(node -p "require('./package.json').version")
+          mv dist/TwinDesk-Mesh.dmg "dist/TwinDesk-Mesh-$v-arm64.dmg"
 
-      - name: Cleanup signing keychain
-        if: always()
-        run: |
-          if [ -n "$SIGNING_KEYCHAIN_PATH" ] && [ -f "$SIGNING_KEYCHAIN_PATH" ]; then
-            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
-          fi
-
-      - name: Upload DMG artifact
+      - name: Upload the disk image
         uses: actions/upload-artifact@v4
         with:
-          name: twindesk-macos-dmg
+          name: twindesk-mesh-mac-arm64
           path: mac/dist/*.dmg
 
-      # Straight onto the release, no download and re-upload.
       - name: Upload to the release
-        if: inputs.tag != ''
-        shell: bash
+        if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${{ inputs.tag }}" >/dev/null 2>&1 || gh release create "${{ inputs.tag }}" --draft --target main --title "${{ inputs.tag }}" --notes "" || true
-          gh release upload "${{ inputs.tag }}" mac/dist/*.dmg --clobber
+          TAG="$RELEASE_TAG"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes --latest || true
+          gh release upload "$TAG" mac/dist/*.dmg --clobber
