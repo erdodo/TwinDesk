@@ -80,7 +80,7 @@ contextBridge.exposeInMainWorld('macshare', {
   phoneCamera: call('phoneCamera'),
   phoneListCameras: call('phoneListCameras'),
   camera: call('camera'),
-  onCamPreview: (fn) => ipcRenderer.on('vcam:preview', (_e, buf) => fn(buf)),
+  onCamPreview: (fn) => ipcRenderer.on('vcam:preview', (_e, buf, wcId) => fn(buf, wcId)),
   phoneOpenApp: call('phoneOpenApp'),
   phoneCloseView: call('phoneCloseView'),
   phoneRetry: call('phoneRetry'),

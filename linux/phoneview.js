@@ -126,6 +126,9 @@ class PhoneViews extends EventEmitter {
     const v = this._open({ kind: 'camera', title: name, width: 854, height: 512, opts: this._cameraOpts(facing, opts.size), hidden: !opts.show });
     if (!v) return;
     v.facing = facing;
+    if (this.vcam && this.vcam.syncPhoneSlot && this.server && this.server.id) {
+      this.vcam.syncPhoneSlot(this.server.id, v.win && v.win.webContents);
+    }
     this.emit('change'); // with its facing, for the tab and the phone
   }
 
@@ -167,11 +170,24 @@ class PhoneViews extends EventEmitter {
   }
 
   cameraState() {
-    if (!this.cameraOn) return { on: false, facing: null, error: 'Camera is off on this computer: turn it on in TwinDesk’s Camera tab there', virtual: false, virtualActive: false };
+    if (!this.cameraOn) return { on: false, facing: null, error: 'Camera is off on this computer: turn it on in TwinDesk’s Camera tab there', virtual: false, virtualActive: false, wcId: null, slot: null, shown: false };
     const v = [...this.views.values()].find((x) => x.kind === 'camera' && !x.ending);
     const wc = v && v.win && !v.win.isDestroyed() ? v.win.webContents : null;
-    const virtualActive = !!(v && wc && this.vcam && this.vcam.ready && (!this.vcam.activeSource || this.vcam.activeSource === wc));
-    return { on: !!v, facing: v ? v.facing : null, error: v ? v.error || '' : '', virtual: !!(this.vcam && this.vcam.ready), virtualActive, viewId: v ? v.id : null };
+    const phoneId = (this.server && this.server.id) || null;
+    const slot = (this.vcam && wc && this.vcam.getSlot) ? this.vcam.getSlot(wc) : (this.vcam && phoneId && this.vcam.getSlot ? this.vcam.getSlot(phoneId) : null);
+    const hasSlotMap = !!(this.vcam && this.vcam.slotMap && this.vcam.slotMap.size > 0);
+    const virtualActive = !!(v && wc && this.vcam && this.vcam.ready && (hasSlotMap ? (slot !== null && slot !== undefined) : (!this.vcam.activeSource || this.vcam.activeSource === wc)));
+    return {
+      on: !!v,
+      facing: v ? v.facing : null,
+      error: v ? v.error || '' : '',
+      virtual: !!(this.vcam && this.vcam.ready),
+      virtualActive,
+      viewId: v ? v.id : null,
+      shown: !!(v && v.win && !v.win.isDestroyed() && v.win.isVisible()),
+      wcId: wc ? wc.id : null,
+      slot: slot !== undefined ? slot : null,
+    };
   }
 
   openApp(pkg, name) {

@@ -10,8 +10,20 @@ const fs = require('fs');
 const path = require('path');
 
 const NAME = 'TwinDesk Camera';
+const SLOTS = [
+  'TwinDesk Camera',
+  'TwinDesk Camera 2',
+  'TwinDesk Camera 3',
+  'TwinDesk Camera 4',
+];
 const WRITER = path.join(__dirname, '..', 'linux-helper', 'bin', 'twindesk-vcam');
 const SYS = '/sys/class/video4linux';
+
+let multi = false;
+
+function setMulti(val) {
+  multi = !!val;
+}
 
 function run(cmd, args, timeout = 600000) {
   return new Promise((resolve) => {
@@ -21,16 +33,33 @@ function run(cmd, args, timeout = 600000) {
   });
 }
 
-// /dev/videoN of our device, or ''.
-function device() {
+function findDevice(target) {
   try {
     for (const d of fs.readdirSync(SYS)) {
       let name = '';
       try { name = fs.readFileSync(path.join(SYS, d, 'name'), 'utf8').trim(); } catch {}
-      if (name === NAME) return '/dev/' + d;
+      if (name === target) return '/dev/' + d;
     }
   } catch {}
   return '';
+}
+
+// /dev/videoN of our device, or ''.
+function device(slot) {
+  if (!multi || slot === undefined) {
+    return findDevice(NAME);
+  }
+  const target = typeof slot === 'number' ? (SLOTS[slot] || SLOTS[0]) : (slot || SLOTS[0]);
+  let dev = findDevice(target);
+  if (!dev && target !== NAME) {
+    // Best-effort lazy creation of extra cameras (TwinDesk Camera 2..4)
+    try {
+      const { spawnSync } = require('child_process');
+      spawnSync('v4l2loopback-ctl', ['add', '-n', target, '-x', '1'], { stdio: 'ignore' });
+      dev = findDevice(target);
+    } catch {}
+  }
+  return dev;
 }
 
 // Root, through pkexec. Its own options only when nothing else (OBS) has set v4l2loopback's: then
@@ -66,9 +95,18 @@ const driver = {
   name: NAME,
   always: true,
 
-  async check() {
+  get slots() {
+    return multi ? SLOTS : undefined;
+  },
+
+  setMulti,
+  isMulti() { return multi; },
+  INSTALL,
+  installScript() { return INSTALL; },
+
+  async check(slot) {
     if (!fs.existsSync(WRITER)) return { supported: false, message: 'Not in this build of TwinDesk' };
-    return { supported: true, installed: !!device() };
+    return { supported: true, installed: !!device(slot) };
   },
 
   async install() {
@@ -81,16 +119,33 @@ const driver = {
   // Our device goes; the module only when it's ours alone.
   async remove() {
     const dev = device();
-    const r = await run('pkexec', ['sh', '-c', `
+    const script = multi ? `
+rm -f /etc/modules-load.d/twindesk-vcam.conf /etc/modprobe.d/twindesk-vcam.conf
+for d in $(ls /sys/class/video4linux 2>/dev/null); do
+  NAME=$(cat /sys/class/video4linux/$d/name 2>/dev/null || true)
+  case "$NAME" in
+    "TwinDesk Camera"*)
+      if command -v v4l2loopback-ctl >/dev/null 2>&1; then
+        v4l2loopback-ctl delete "/dev/$d" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
+done
+OTHERS=$(grep -ls 'options v4l2loopback' /etc/modprobe.d/*.conf 2>/dev/null | grep -v twindesk-vcam.conf || true)
+if [ -z "$OTHERS" ]; then modprobe -r v4l2loopback 2>/dev/null || true; fi
+` : `
 rm -f /etc/modules-load.d/twindesk-vcam.conf /etc/modprobe.d/twindesk-vcam.conf
 if [ -n "${dev}" ] && command -v v4l2loopback-ctl >/dev/null 2>&1 && v4l2loopback-ctl delete ${dev} >/dev/null 2>&1; then :
 else modprobe -r v4l2loopback; fi
-`]);
+`;
+    const r = await run('pkexec', ['sh', '-c', script]);
     if (!r.ok) throw new Error(r.code === 126 ? 'The password prompt was closed' : (r.err.split('\n').pop() || 'pkexec failed'));
   },
 
-  feed(onExit) {
-    const p = spawn(WRITER, [device()], { stdio: ['pipe', 'ignore', 'pipe'] });
+  feed(onExit, slot) {
+    const dev = device(slot);
+    if (multi && !dev) return null;
+    const p = spawn(WRITER, [dev], { stdio: ['pipe', 'ignore', 'pipe'] });
     p.stderr.on('data', (d) => console.log('[vcam] ' + String(d).trim()));
     p.on('exit', onExit);
     p.on('error', onExit);

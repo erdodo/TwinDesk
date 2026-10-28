@@ -241,6 +241,22 @@ function setupIpc(ctx) {
         const v = [...ctx.phoneViews.views.values()].find((x) => x.kind === 'camera' && !x.ending);
         if (v && v.win && !v.win.isDestroyed()) ctx.vcam.setActiveSource(v.win.webContents);
       }
+    } else if (m.do === 'slot' && ctx.vcam) {
+      let wc = m.wc;
+      if (!wc && m.viewId && ctx.phone) {
+        for (const u of ctx.phone.all) {
+          const v = u.views && u.views.views.get(Number(m.viewId));
+          if (v && v.win && !v.win.isDestroyed()) { wc = v.win.webContents; break; }
+        }
+      } else if (!wc && m.phoneId && ctx.phone) {
+        const u = ctx.phone.unit(m.phoneId);
+        if (u && u.views) {
+          const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) wc = v.win.webContents;
+        }
+      }
+      if (wc) ctx.vcam.setSlot(wc, m.slot);
+      if (m.phoneId) ctx.vcam.setSlot(m.phoneId, m.slot);
     }
   });
   phone('phoneOpenApp', (arg) => arg && typeof arg.id === 'string' && ctx.phoneViews.openApp(arg.id.slice(0, 200), String(arg.name || '').slice(0, 100)));

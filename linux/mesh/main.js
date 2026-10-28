@@ -515,8 +515,10 @@ function loadHub() {
 function loadCamera() {
   if (vcam || !settings.camera || !settings.camera.on) return vcam;
   const { VirtualCam } = require('../../shared/vcam.js');
+  const driver = require('../vcam');
+  if (typeof driver.setMulti === 'function') driver.setMulti(true);
   vcam = new VirtualCam({
-    driver: require('../vcam'),
+    driver,
     cfg: () => settings.camera,
     save: saveSettings,
     onChange: pushState,
