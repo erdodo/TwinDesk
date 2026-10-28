@@ -92,6 +92,7 @@ UI.tab({
       UI.row('Picture', 'For the screen window and app windows', [quality]),
       UI.row('Show the phone’s wallpaper here', 'Lets TwinDesk on the phone read it (set up over wireless debugging)', [wall]),
       UI.row('Mouse and keyboard', 'Push the pointer off the edge of the screen to use the phone. Double-tap the hotkey to come back.', [UI.button('Cursor Settings', () => UI.go('cursor'), 'small')]),
+      UI.row('Camera', 'Use the phone’s camera as a webcam or window', [UI.button('Camera Settings', () => UI.go('camera'), 'small')]),
     ]);
 
     const notConnected = UI.note('info', '');
@@ -108,6 +109,7 @@ UI.tab({
     };
 
     function render(s) {
+      curState = s;
       media.update(s);
       const ph = s.phone || {};
       const c = ph.connected;
@@ -184,7 +186,11 @@ UI.tab({
       const wk = JSON.stringify(wins);
       if (wk !== winKey) {
         winKey = wk;
-        winList.replaceChildren(...wins.map((w) => UI.row(w.kind === 'screen' ? 'Phone screen' : w.title, w.kind === 'screen' ? 'Mirror' : w.app, [UI.button('Close', () => api.phoneCloseView(w.id), 'small')])));
+        winList.replaceChildren(...wins.map((w) => UI.row(
+          w.kind === 'screen' ? 'Phone screen' : w.kind === 'camera' ? 'Phone camera' : w.title,
+          w.kind === 'screen' ? 'Mirror' : w.kind === 'camera' ? (w.facing ? `${w.facing} camera` : 'Camera') : w.app,
+          [UI.button('Close', () => api.phoneCloseView(w.id), 'small')]
+        )));
       }
     }
     return render;

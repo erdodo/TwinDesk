@@ -205,8 +205,62 @@ function setupIpc(ctx) {
       for (const v of ctx.phoneViews.list()) if (v.kind === 'screen') ctx.phoneViews.close(v.id);
     } else ctx.phoneViews.openScreen();
   });
+  phone('phoneCamera', (open, opts) => {
+    if (open !== false && ctx.setCamera && (!ctx.settings.camera || !ctx.settings.camera.on)) ctx.setCamera(true);
+    const pv = (opts && opts.id && ctx.phone && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).views) || ctx.phoneViews;
+    if (!pv) return;
+    if (open === false) {
+      for (const v of pv.list()) if (v.kind === 'camera') pv.close(v.id);
+    } else pv.openCamera(opts);
+  });
+  phone('phoneListCameras', (opts) => {
+    const b = (opts && opts.id && ctx.phone && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).bridge) || (ctx.phone && ctx.phone.bridge);
+    return b ? b.listCameras() : [];
+  });
+  handle('camera', (m) => {
+    if (m && m.do === 'on') return ctx.setCamera(m.on === true);
+    if (!m || typeof m !== 'object') return;
+    if (m.do === 'virtual' && ctx.vcam) ctx.vcam.setOn(m.on === true);
+    else if (m.do === 'vcamRemove' && ctx.vcam) ctx.vcam.remove();
+    else if (m.do === 'vcamTarget' && ctx.vcam) ctx.vcam.setTarget(m.target);
+    else if (m.do === 'rotate' && ctx.vcam) ctx.vcam.turn();
+    else if (m.do === 'activeSource' && ctx.vcam) {
+      if (m.wc) ctx.vcam.setActiveSource(m.wc);
+      else if (m.viewId && ctx.phone) {
+        for (const u of ctx.phone.all) {
+          const v = u.views && u.views.views.get(Number(m.viewId));
+          if (v && v.win && !v.win.isDestroyed()) { ctx.vcam.setActiveSource(v.win.webContents); break; }
+        }
+      } else if (m.phoneId && ctx.phone) {
+        const u = ctx.phone.unit(m.phoneId);
+        if (u && u.views) {
+          const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) ctx.vcam.setActiveSource(v.win.webContents);
+        }
+      } else if (ctx.phoneViews) {
+        const v = [...ctx.phoneViews.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+        if (v && v.win && !v.win.isDestroyed()) ctx.vcam.setActiveSource(v.win.webContents);
+      }
+    } else if (m.do === 'slot' && ctx.vcam) {
+      let wc = m.wc;
+      if (!wc && m.viewId && ctx.phone) {
+        for (const u of ctx.phone.all) {
+          const v = u.views && u.views.views.get(Number(m.viewId));
+          if (v && v.win && !v.win.isDestroyed()) { wc = v.win.webContents; break; }
+        }
+      } else if (!wc && m.phoneId && ctx.phone) {
+        const u = ctx.phone.unit(m.phoneId);
+        if (u && u.views) {
+          const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) wc = v.win.webContents;
+        }
+      }
+      if (wc) ctx.vcam.setSlot(wc, m.slot);
+      if (m.phoneId) ctx.vcam.setSlot(m.phoneId, m.slot);
+    }
+  });
   phone('phoneOpenApp', (arg) => arg && typeof arg.id === 'string' && ctx.phoneViews.openApp(arg.id.slice(0, 200), String(arg.name || '').slice(0, 100)));
-  phone('phoneCloseView', (id) => ctx.phoneViews.close(Number(id)));
+  phone('phoneCloseView', (id) => (ctx.phone && ctx.phone.closeView ? ctx.phone.closeView(Number(id)) : ctx.phoneViews.close(Number(id))));
   phone('phoneRetry', (id) => { const u = typeof id === 'string' && id ? ctx.phone.unit(id.slice(0, 64)) : null; (u || ctx.phone).bridge._kick(); });
   phone('phoneInstallFull', () => ctx.phone.bridge.installFull());
   handle('phoneAssets', () => (ctx.phone ? ctx.phone.assetsView() : { wallpaper: '', apps: [] }));

@@ -145,6 +145,7 @@ class PhoneBridge extends EventEmitter {
       control: !!(this.control && !this.control.closed), driving: !!this.kvm,
       install: this.install, fullApk: !!fullApk(),
       windows: this.views ? this.views.list() : [],
+      camera: this.views && typeof this.views.cameraState === 'function' ? this.views.cameraState() : null,
       // the phone's sound without adb: asked for, playing, waiting for Start on the phone, or why not
       sound: { net: this.netSound.asked, on: this.netSound.on, waiting: this.netSound.waiting, error: this.netSound.error },
     };
@@ -166,11 +167,13 @@ class PhoneBridge extends EventEmitter {
     return /[:]/.test(this.serial) || this.serial.includes('._adb-tls') ? 'wifi' : 'usb';
   }
 
-  // viewed: a phone window is open here (meanwhile the phone keeps its Wi-Fi out of power save).
+  // viewed: a phone window is open here (meanwhile the phone keeps its Wi-Fi out of power save);
+  // camera: its camera here, for its Camera page ({on, facing, error, virtual}: phoneview.js cameraState).
   _tellPhone() {
     if (!isPhone(this.server.current)) return;
     const viewed = !!(this.views && this.views.list().length);
-    this.server.sendToClient({ t: T.ADB_BRIDGE, state: this.state, message: this.message, canPair: this.canPair, inputBlocked: this.inputBlocked, viewed });
+    const camera = this.views && typeof this.views.cameraState === 'function' ? this.views.cameraState() : null;
+    this.server.sendToClient({ t: T.ADB_BRIDGE, state: this.state, message: this.message, canPair: this.canPair, inputBlocked: this.inputBlocked, viewed, camera });
   }
 
   // MIUI and HyperOS refuse adb's touches and keys (INJECT_EVENTS) until Developer options ›
@@ -728,12 +731,24 @@ class PhoneBridge extends EventEmitter {
 
   // ---- windows (phoneview.js) ----
 
-  // Options for a new screen/app session, from settings.
+  // Options for a new screen/app/camera session, from settings.
   sessionOpts(kind, extra = {}) {
     const ph = this.getSettings().phone || {};
     const base = { video: true, control: true, maxFps: 60, videoBitRate: (ph.bitrateMbps || 8) * 1000000 };
+    if (kind === 'camera') return { ...base, audio: false, stayAwake: true, flex: false, ...extra };
     if (kind === 'screen') return { ...base, audio: !!ph.sound, maxSize: ph.maxSize || 0, stayAwake: true, ...extra };
     return { ...base, audio: false, flex: true, ...extra };
+  }
+
+  async listCameras() {
+    if (!this.serial || this.state !== 'ready') return [];
+    try {
+      const { Session } = require('../scrcpy');
+      return await Session.listCameras(this.adb, this.serial);
+    } catch (e) {
+      console.log('[phone-bridge] listCameras failed:', e && e.message);
+      return [];
+    }
   }
 
   setupView() {
