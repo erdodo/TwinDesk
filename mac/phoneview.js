@@ -190,7 +190,7 @@ class PhoneViews extends EventEmitter {
     const v = [...this.views.values()].find((x) => x.kind === 'camera' && !x.ending);
     const wc = v && v.win && !v.win.isDestroyed() ? v.win.webContents : null;
     const virtualActive = !!(v && wc && this.vcam && this.vcam.ready && (!this.vcam.activeSource || this.vcam.activeSource === wc));
-    return { on: !!v, facing: v ? v.facing : null, error: v ? v.error || '' : '', virtual: !!(this.vcam && this.vcam.ready), virtualActive, viewId: v ? v.id : null };
+    return { on: !!v, facing: v ? v.facing : null, error: v ? v.error || '' : '', virtual: !!(this.vcam && this.vcam.ready), virtualActive, viewId: v ? v.id : null, shown: !!(v && v.win && !v.win.isDestroyed() && v.win.isVisible()) };
   }
 
   openApp(pkg, name) {

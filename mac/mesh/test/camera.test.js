@@ -420,6 +420,28 @@ function makeMockAdb(port) {
     vcam.stop();
   }
 
+  // Test 4: Camera tab in left menu navigation and page structure
+  {
+    console.log('Test 4: Camera nav entry and page layout');
+    const M = require('../../../shared/sidebar-model.js');
+    assert.ok(M.GLOBAL.includes('camera'), 'camera is in GLOBAL');
+    assert.strictEqual(M.isScoped('camera'), false, 'camera is a global tab in mesh');
+    assert.strictEqual(M.sectionVisible('camera', 'phone'), true, 'camera visible for phone');
+    assert.strictEqual(M.sectionVisible('camera', 'computer'), true, 'camera visible for computer');
+    assert.strictEqual(M.sectionVisible('camera', 'none'), true, 'camera visible when none selected');
+
+    // Verify control.html loads mesh/ui-camera.js
+    const fs = require('fs');
+    const path = require('path');
+    const html = fs.readFileSync(path.resolve(__dirname, '../control.html'), 'utf8');
+    assert.ok(html.includes('mesh/ui-camera.js'), 'mesh/control.html loads mesh/ui-camera.js');
+
+    // Verify ui-phone.js does not contain camCard
+    const phoneUi = fs.readFileSync(path.resolve(__dirname, '../ui-phone.js'), 'utf8');
+    assert.ok(!phoneUi.includes('camCard'), 'camCard removed from ui-phone.js');
+    assert.ok(phoneUi.includes("UI.go('camera')"), 'ui-phone.js contains link to camera page');
+  }
+
   mockAdbServer.close();
   console.log('All Mac camera tests passed!');
   process.exit(0);
