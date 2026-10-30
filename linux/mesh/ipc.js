@@ -259,6 +259,25 @@ function setupIpc(ctx) {
       if (m.phoneId) ctx.vcam.setSlot(m.phoneId, m.slot);
     }
   });
+  // Remote tab: the phone's Remote page here (shared/phone-remote.js).
+  handle('setRemote', (m) => {
+    if (!m || typeof m !== 'object') return;
+    const r = ctx.phoneRemote;
+    if ('allow' in m && !r && m.allow === true) {
+      settings.remote = { ...(settings.remote || {}), allow: true };
+      if (ctx.loadRemote) ctx.loadRemote();
+    } else if ('allow' in m && r) {
+      r.setAllow(m.allow === true);
+    }
+    if ('pad' in m && !r && m.pad === true) {
+      settings.remote = { ...(settings.remote || {}), pad: true };
+      if (ctx.loadRemote) ctx.loadRemote();
+    } else if ('pad' in m && r) {
+      r.setPad(m.pad === true);
+    }
+    ctx.save();
+    ctx.push();
+  });
   phone('phoneOpenApp', (arg) => arg && typeof arg.id === 'string' && ctx.phoneViews.openApp(arg.id.slice(0, 200), String(arg.name || '').slice(0, 100)));
   phone('phoneCloseView', (id) => (ctx.phone && ctx.phone.closeView ? ctx.phone.closeView(Number(id)) : ctx.phoneViews.close(Number(id))));
   phone('phoneRetry', (id) => { const u = typeof id === 'string' && id ? ctx.phone.unit(id.slice(0, 64)) : null; (u || ctx.phone).bridge._kick(); });
@@ -302,6 +321,7 @@ function setupIpc(ctx) {
     kvm: () => kvm.applyConfig(),
     pcApps: () => { pcApps.apply(); pcApps.input.release(); },
     macApps: () => peerApps.apply(),
+    remote: () => ctx.loadRemote && ctx.loadRemote(),
   };
   return { set: (section, partial) => change(section, partial, AFTER[section]) };
 }

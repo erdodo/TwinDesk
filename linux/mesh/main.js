@@ -131,6 +131,7 @@ let hostServer = null; // server.js, once the certificate exists
 let phone = null; // A phone as the peer: phone.js (its .bridge: phone-bridge.js)
 let phoneDrive = null; // its storage as a drive here (phonedrive.js), the first phone's
 let vcam = null; // Camera: the running camera's picture, to the panel and the virtual camera (shared/vcam.js, vcam.js)
+let phoneRemote = null; // Remote: the phone as touchpad, keyboard and gamepad here (shared/phone-remote.js)
 // (the screen and apps of a phone in windows here: phoneview.js, per phone, phone.views for the active one)
 let bleHost = null; // Bluetooth, for devices not on this network: we host (blepipe.js, the helper's ble.c)
 let bleGuest = null; // never set: with Multi-device, computers connect over the network only
@@ -236,6 +237,7 @@ function start() {
     if (mode === 'driving') hud.show('away', (kvm.keyboardOnly ? 'Typing on ' : 'Using ') + name);
     else if (mode === 'driven') hud.show('driven', name + ' is using {me}');
     else hud.show('home', 'Back on {me}');
+    if (phoneRemote) phoneRemote.refresh();
   };
   // Cursor lock: the popup goes where the pointer is (the device we drive shows its own).
   kvm.onLock = (on, mode) => {
@@ -319,6 +321,7 @@ function start() {
   const ipc = setupIpc({ hub, link, discovery, screen, clip, kvm, layoutSync, fileDrop, smb, fileClip, vdd, sound, pcScreen, notifs, wake, terminal, sshd, apps, pcApps, peerApps, updates, settings, save: saveSettings, push: pushState, buildState,
     get phone() { return phone; }, get phoneViews() { return phone ? phone.views : null; }, get phoneDrive() { return phoneDrive; }, connectPhoneDev, cancelPhoneInvite, phoneHub: loadHub,
     get vcam() { return vcam; }, setCamera,
+    get phoneRemote() { return phoneRemote; }, loadRemote,
     applyMesh: () => autoJoin && autoJoin.schedule(),
     get net() { return net; }, get wifi() { return wifi; }, applyNet, joinHotspot, openBluetoothSettings,
     checkFirewall, fixFirewall, fixInput, setStartup, onApp: () => updateTray(buildState()) });
@@ -401,6 +404,11 @@ async function startHost(tries = 0) {
 function startPhone(server, pairing) {
   const pl = new PhoneLink(hub, server);
   setupHub(pl);
+  phoneLink = pl;
+  // Remote off: its page hears so; on, PhoneRemote answers instead.
+  pl.on(`t:${P.T.REMOTE_HELLO}`, (m, ctx) => !phoneRemote && ctx && ctx.os === P.OS.ANDROID
+    && pl.sendToClient({ t: P.T.REMOTE_STATE, allowed: false, why: 'Remote is off on this computer: turn it on in TwinDesk’s Remote page there' }, ctx.deviceId));
+  loadRemote();
   const adb = new Adb(); // one adb for every phone
   // A phone on a USB cable: pairing, the session, screen and sound through it (no Wi-Fi needed).
   wired = new Wired({ adb, raw: server, peer: pl, getId: () => device.id, getName: () => device.name,
@@ -556,6 +564,23 @@ function setCamera(on) {
     }
   }
   pushState();
+}
+
+// Remote: the phone as touchpad, keyboard and gamepad here (shared/phone-remote.js).
+function loadRemote() {
+  if (phoneRemote || !phoneLink || (settings.remote && settings.remote.allow === false)) return phoneRemote;
+  const { PhoneRemote } = require('../../shared/phone-remote.js');
+  phoneRemote = new PhoneRemote({
+    server: phoneLink,
+    helper,
+    getSettings: () => settings,
+    atHome: () => !kvm || kvm.mode === 'home',
+    onChange: pushState,
+    loadPad: () => require('../gamepad'),
+    save: saveSettings,
+  });
+  phoneRemote.refresh();
+  return phoneRemote;
 }
 
 // ---- not on the same network: Bluetooth, and Wi-Fi when it's needed ----
@@ -957,6 +982,22 @@ function buildState() {
     setup: { missing: miss, show: setupShows(miss) },
     camera: { on: !!(settings.camera && settings.camera.on) },
     vcam: vcam ? vcam.view() : { checked: true, supported: true, on: false },
+    remote: phoneRemote ? phoneRemote.view
+      : {
+          allow: !(settings.remote && settings.remote.allow === false),
+          why: '',
+          opened: false,
+          using: false,
+          phones: [],
+          pad: {
+            on: !!(settings.remote && settings.remote.pad),
+            supported: true,
+            live: false,
+            busy: '',
+            message: '',
+            name: 'TwinDesk Gamepad',
+          },
+        },
     phone: phone ? { ...phone.view, settings: settings.phone } : null,
     mount: { ...(phoneDrive ? phoneDrive.view : {}), on: settings.mount.on },
     // Calls, Messages and Photos: the settings alone until the hub is loaded (setupHub).

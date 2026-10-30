@@ -42,9 +42,12 @@ const driver = {
     if (!writable()) throw new Error('/dev/uinput is there but not this user’s yet: log out and in again');
   },
 
-  feed(onExit) {
-    const p = spawn(WRITER, [], { stdio: ['pipe', 'ignore', 'pipe'] });
-    p.stderr.on('data', (d) => console.log('[pad] ' + String(d).trim()));
+  feed(onExit, slot = null) {
+    const args = [];
+    if (slot !== null && slot !== undefined) args.push(String(slot));
+    const p = spawn(WRITER, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    p.slot = slot;
+    p.stderr.on('data', (d) => console.log(`[pad${slot ? ' ' + slot : ''}] ` + String(d).trim()));
     p.on('exit', onExit);
     p.on('error', onExit);
     p.stdin.on('error', () => {});
