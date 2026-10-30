@@ -209,8 +209,85 @@ function setupIpc(ctx) {
       for (const v of ctx.phoneViews.list()) if (v.kind === 'screen') ctx.phoneViews.close(v.id);
     } else ctx.phoneViews.openScreen();
   });
+  phone('phoneCamera', (open, opts) => {
+    if (open !== false && ctx.setCamera && (!ctx.settings.camera || !ctx.settings.camera.on)) ctx.setCamera(true);
+    const pv = (opts && opts.id && ctx.phone && ctx.phone.unit && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).views) || ctx.phoneViews;
+    if (!pv) return;
+    if (open === false) {
+      for (const v of pv.list()) if (v.kind === 'camera') pv.close(v.id);
+    } else pv.openCamera(opts);
+  });
+  phone('phoneListCameras', (opts) => {
+    const b = (opts && opts.id && ctx.phone && ctx.phone.unit && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).bridge) || (ctx.phone && (ctx.phone.bridge || (ctx.phone.active && ctx.phone.active.bridge)));
+    return b ? b.listCameras() : [];
+  });
+  handle('camera', (m) => {
+    if (m && m.do === 'on') return ctx.setCamera(m.on === true);
+    if (!m || typeof m !== 'object') return;
+    if (m.do === 'virtual' && ctx.vcam) ctx.vcam.setOn(m.on === true);
+    else if (m.do === 'vcamRemove' && ctx.vcam) ctx.vcam.remove();
+    else if (m.do === 'vcamTarget' && ctx.vcam) ctx.vcam.setTarget(m.target);
+    else if (m.do === 'rotate' && ctx.vcam) ctx.vcam.turn();
+    else if (m.do === 'activeSource' && ctx.vcam) {
+      if (m.wc) ctx.vcam.setActiveSource(m.wc);
+      else if (m.viewId && ctx.phone && ctx.phone.all) {
+        for (const u of ctx.phone.all) {
+          const v = u.views && u.views.views.get(Number(m.viewId));
+          if (v && v.win && !v.win.isDestroyed()) { ctx.vcam.setActiveSource(v.win.webContents); break; }
+        }
+      } else if (m.phoneId && ctx.phone) {
+        const u = ctx.phone.unit && ctx.phone.unit(m.phoneId);
+        if (u && u.views) {
+          const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) ctx.vcam.setActiveSource(v.win.webContents);
+        }
+      } else if (ctx.phoneViews) {
+        const v = [...ctx.phoneViews.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+        if (v && v.win && !v.win.isDestroyed()) ctx.vcam.setActiveSource(v.win.webContents);
+      }
+    } else if (m.do === 'slot' && ctx.vcam) {
+      let wc = m.wc;
+      if (!wc && m.viewId && ctx.phone && ctx.phone.all) {
+        for (const u of ctx.phone.all) {
+          const v = u.views && u.views.views.get(Number(m.viewId));
+          if (v && v.win && !v.win.isDestroyed()) { wc = v.win.webContents; break; }
+        }
+      } else if (!wc && m.phoneId && ctx.phone) {
+        const u = ctx.phone.unit && ctx.phone.unit(m.phoneId);
+        if (u && u.views) {
+          const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) wc = v.win.webContents;
+        }
+      }
+      if (wc) ctx.vcam.setSlot(wc, m.slot);
+      if (m.phoneId) ctx.vcam.setSlot(m.phoneId, m.slot);
+    }
+  });
+  // Remote tab: the phone's Remote page here (shared/phone-remote.js).
+  handle('setRemote', (m) => {
+    if (!m || typeof m !== 'object') return;
+    const r = ctx.phoneRemote;
+    if ('allow' in m && !r && m.allow === true) {
+      settings.remote = { ...(settings.remote || {}), allow: true };
+      if (ctx.loadRemote) ctx.loadRemote();
+    } else if ('allow' in m && r) {
+      r.setAllow(m.allow === true);
+    } else if ('allow' in m && !r) {
+      settings.remote = { ...(settings.remote || {}), allow: m.allow === true };
+    }
+    if ('pad' in m && !r && m.pad === true) {
+      settings.remote = { ...(settings.remote || {}), pad: true };
+      if (ctx.loadRemote) ctx.loadRemote();
+    } else if ('pad' in m && r) {
+      r.setPad(m.pad === true);
+    } else if ('pad' in m && !r) {
+      settings.remote = { ...(settings.remote || {}), pad: m.pad === true };
+    }
+    ctx.save();
+    ctx.push();
+  });
   phone('phoneOpenApp', (arg) => arg && typeof arg.id === 'string' && ctx.phoneViews.openApp(arg.id.slice(0, 200), String(arg.name || '').slice(0, 100)));
-  phone('phoneCloseView', (id) => ctx.phoneViews.close(Number(id)));
+  phone('phoneCloseView', (id) => (ctx.phone && ctx.phone.closeView ? ctx.phone.closeView(Number(id)) : ctx.phoneViews.close(Number(id))));
   // Right-click on a phone app: open it, or pin it to Start (phoneview.js).
   phone('phoneAppMenu', (arg) => {
     if (!arg || typeof arg.id !== 'string' || !/^[\w.]{1,200}$/.test(arg.id)) return;
@@ -253,6 +330,7 @@ function setupIpc(ctx) {
     audio: () => sound.apply(),
     kvm: () => kvm.applyConfig(),
     pcApps: () => { pcApps.apply(); pcApps.input.release(); },
+    remote: () => ctx.loadRemote && ctx.loadRemote(),
   };
   return { set: (section, partial) => change(section, partial, AFTER[section]) };
 }

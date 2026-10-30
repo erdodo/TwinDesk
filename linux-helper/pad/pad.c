@@ -47,7 +47,7 @@ static int readAll(uint8_t *buf, size_t n) {
   return 1;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
   if (fd < 0) { fprintf(stderr, "twindesk-pad: /dev/uinput: %s\n", strerror(errno)); return 2; }
   ioctl(fd, UI_SET_EVBIT, EV_KEY);
@@ -67,7 +67,11 @@ int main(void) {
   setup.id.vendor = 0x045e; // Microsoft
   setup.id.product = 0x028e; // Xbox 360 Controller
   setup.id.version = 0x0110;
-  snprintf(setup.name, UINPUT_MAX_NAME_SIZE, "TwinDesk Gamepad");
+  if (argc > 1 && argv[1][0]) {
+    snprintf(setup.name, UINPUT_MAX_NAME_SIZE, "TwinDesk Gamepad %s", argv[1]);
+  } else {
+    snprintf(setup.name, UINPUT_MAX_NAME_SIZE, "TwinDesk Gamepad");
+  }
   if (ioctl(fd, UI_DEV_SETUP, &setup) || ioctl(fd, UI_DEV_CREATE)) {
     fprintf(stderr, "twindesk-pad: uinput: %s\n", strerror(errno));
     return 2;

@@ -47,14 +47,24 @@ class PhoneLink extends EventEmitter {
   }
 
   // To that phone's session (its role swap and checks as for any device). Nothing without a phone.
-  sendToClient(msg) {
+  sendToClient(msg, id = null) {
+    if (id) {
+      const devId = typeof id === 'object' ? id.id || id.deviceId : id;
+      const s = this.hub.sessions.get(devId);
+      if (s) return s.send(msg);
+    }
     const c = this.current;
     const s = c && this.hub.sessions.get(c.deviceId);
     if (s) s.send(msg);
   }
 
   // A message as if that phone had sent it (the phone bridge answers for the phone's input).
-  inject(msg) {
+  inject(msg, id = null) {
+    if (id) {
+      const devId = typeof id === 'object' ? id.id || id.deviceId : id;
+      const s = this.hub.sessions.get(devId);
+      if (s) return s.inject(msg);
+    }
     const c = this.current;
     const s = c && this.hub.sessions.get(c.deviceId);
     if (s) s.inject(msg);

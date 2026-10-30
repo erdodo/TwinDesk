@@ -18,7 +18,7 @@ const SETTINGS_URLS = {
   location: 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices',
   extensions: 'x-apple.systempreferences:com.apple.ExtensionsPreferences?Sharing',
 };
-const TABS = ['phone', 'overview', 'calls', 'messages', 'media', 'pfiles', 'share', 'receive', 'cursor', 'keyboard', 'clipboard', 'notifications', 'files', 'mount', 'terminal', 'audio', 'apps', 'multi', 'general', 'about'];
+const TABS = ['phone', 'overview', 'calls', 'messages', 'media', 'pfiles', 'share', 'receive', 'cursor', 'keyboard', 'clipboard', 'notifications', 'files', 'mount', 'terminal', 'audio', 'camera', 'remote', 'apps', 'multi', 'general', 'about'];
 
 const bool = (v) => !!v;
 const clamp = (lo, hi, dflt) => (v) => {
@@ -157,11 +157,35 @@ function setupIpc(ctx) {
         for (const v of ctx.phoneViews.list()) if (v.kind === 'screen') ctx.phoneViews.close(v.id);
       } else ctx.phoneViews.openScreen();
     },
+    phoneCamera(arg1, arg2) {
+      let open, opts;
+      if (typeof arg1 === 'boolean') {
+        open = arg1;
+        opts = arg2;
+      } else if (arg1 && typeof arg1 === 'object' && ('open' in arg1 || 'opts' in arg1)) {
+        open = arg1.open;
+        opts = arg1.opts;
+      } else {
+        open = arg1;
+        opts = arg2;
+      }
+      if (open !== false && ctx.setCamera && (!ctx.settings.camera || !ctx.settings.camera.on)) ctx.setCamera(true);
+      const pv = (opts && opts.id && ctx.phone && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).views) || ctx.phoneViews;
+      if (!pv) return;
+      if (open === false) {
+        for (const v of pv.list()) if (v.kind === 'camera') pv.close(v.id);
+      } else pv.openCamera(opts);
+    },
+    phoneListCameras(opts) {
+      const b = (opts && opts.id && ctx.phone && ctx.phone.unit(opts.id) && ctx.phone.unit(opts.id).bridge) || (ctx.phone && ctx.phone.bridge);
+      return b ? b.listCameras() : [];
+    },
     phoneOpenApp(arg) {
       if (arg && typeof arg.id === 'string') ctx.phoneViews.openApp(arg.id.slice(0, 200), String(arg.name || '').slice(0, 100));
     },
     phoneCloseView(id) {
-      ctx.phoneViews.close(Number(id));
+      if (ctx.phone && typeof ctx.phone.closeView === 'function') ctx.phone.closeView(Number(id));
+      else if (ctx.phoneViews) ctx.phoneViews.close(Number(id));
     },
     // Right-click on a phone app: open it, or keep it in the Dock (phoneview.js).
     phoneAppMenu(arg) {
@@ -472,6 +496,45 @@ function setupIpc(ctx) {
       setGroup('audio', partial);
       ctx.audio.applySettings();
     },
+    camera(m) {
+      if (m && m.do === 'on') return ctx.setCamera(m.on === true);
+      const vcam = ctx.vcam || (ctx.cam && ctx.cam().vcam);
+      if (!vcam || !m || typeof m !== 'object') return;
+      if (m.do === 'virtual') vcam.setOn(m.on === true);
+      else if (m.do === 'vcamRemove') vcam.remove();
+      else if (m.do === 'vcamTarget') vcam.setTarget(m.target);
+      else if (m.do === 'rotate') vcam.turn();
+      else if (m.do === 'activeSource') {
+        if (m.wc) vcam.setActiveSource(m.wc);
+        else if (m.viewId && ctx.phone) {
+          for (const u of ctx.phone.all) {
+            const v = u.views && u.views.views.get(Number(m.viewId));
+            if (v && v.win && !v.win.isDestroyed()) { vcam.setActiveSource(v.win.webContents); break; }
+          }
+        } else if (m.phoneId && ctx.phone) {
+          const u = ctx.phone.unit(m.phoneId);
+          if (u && u.views) {
+            const v = [...u.views.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+            if (v && v.win && !v.win.isDestroyed()) vcam.setActiveSource(v.win.webContents);
+          }
+        } else if (ctx.phoneViews) {
+          const v = [...ctx.phoneViews.views.values()].find((x) => x.kind === 'camera' && !x.ending);
+          if (v && v.win && !v.win.isDestroyed()) vcam.setActiveSource(v.win.webContents);
+        }
+      }
+    },
+    // Remote tab: the phone's Remote page here (shared/phone-remote.js).
+    setRemote(m) {
+      if (!m || typeof m !== 'object') return;
+      const r = ctx.remote ? ctx.remote() : (ctx.phoneRemote || null);
+      if ('allow' in m && !r && m.allow === true) {
+        settings.remote = { ...(settings.remote || {}), allow: true };
+        if (ctx.loadRemote) ctx.loadRemote();
+      } else if ('allow' in m && r) {
+        r.setAllow(m.allow === true);
+      }
+      save();
+    },
     // "Share sound with the screen" (Display › Mac → PC).
     setScreenSound(on) {
       settings.sharing.audio = !!on;
@@ -553,6 +616,10 @@ function setupIpc(ctx) {
 
   ipcMain.handle('getState', () => ctx.state);
   ipcMain.handle('phoneAssets', () => ctx.phone.assetsView());
+  ipcMain.handle('phoneListCameras', (_e, opts) => actions.phoneListCameras(opts));
+  ipcMain.handle('phoneCamera', (_e, ...args) => actions.phoneCamera(...args));
+  ipcMain.handle('camera', (_e, m) => actions.camera(m));
+  ipcMain.handle('phoneCloseView', (_e, id) => actions.phoneCloseView(id));
   for (const [name, fn] of Object.entries(actions)) ipcMain.on(name, (_e, arg) => fn(arg));
   return actions;
 }

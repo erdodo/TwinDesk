@@ -100,6 +100,7 @@ UI.tab({
       UI.row('Arrow keys swipe', 'In a phone window: up and down through feeds, Reels and Shorts, left and right through pages. Off: they move the cursor', [arrowSwipe]),
       UI.row('Show the phone’s wallpaper here', 'Lets TwinDesk on the phone read it (set up over wireless debugging)', [wall]),
       UI.row('Mouse and keyboard', 'Push the pointer off the edge of the screen to use the phone. Double-tap the hotkey to come back.', [UI.button('Cursor Settings', () => UI.go('cursor'), 'small')]),
+      UI.row('Camera', 'Use the phone’s camera as a webcam or window', [UI.button('Camera Settings', () => UI.go('camera'), 'small')]),
     ]);
 
     const notConnected = UI.note('info', '');

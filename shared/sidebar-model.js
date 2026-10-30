@@ -8,10 +8,10 @@
 (function (root) {
   // Sections that only make sense for one kind of device. Ids of all three apps (the Mac calls
   // Receive screen 'receive' and Share screen 'share', the PC and Linux 'mac-pc' and 'pc-mac').
-  const PHONE_ONLY = ['calls', 'messages', 'media', 'pfiles', 'mount', 'phone', 'remote'];
+  const PHONE_ONLY = ['calls', 'messages', 'media', 'pfiles', 'mount', 'phone'];
   const COMPUTER_ONLY = ['mac-pc', 'receive', 'apps', 'terminal'];
   // Global sections: the same whichever device is selected.
-  const GLOBAL = ['overview', 'general', 'about', 'clipboard', 'notifications', 'setup'];
+  const GLOBAL = ['overview', 'general', 'about', 'clipboard', 'notifications', 'setup', 'camera', 'remote'];
   // Where a device's own sections begin (the first one the app has).
   const FIRST = { phone: ['phone', 'calls'], computer: ['mac-pc', 'receive', 'pc-mac', 'share', 'cursor', 'files'], none: ['overview'] };
 

@@ -102,7 +102,7 @@ class PhoneViews extends EventEmitter {
   }
 
   list() {
-    return [...this.views.values()].filter((v) => v.kind !== 'sound' && v.kind !== 'netsound').map((v) => ({ id: v.id, kind: v.kind, app: v.app || null, title: v.title, facing: v.facing || null, shown: !!(v.win && !v.win.isDestroyed() && v.win.isVisible()), error: v.error || '' }));
+    return [...this.views.values()].filter((v) => v.kind !== 'sound' && v.kind !== 'netsound').map((v) => ({ id: v.id, kind: v.kind, app: v.app || null, title: v.title, facing: v.facing || null, shown: !!(v.win && !v.win.isDestroyed() && v.win.isVisible()), error: v.error || '', wcId: v.win && !v.win.isDestroyed() ? v.win.webContents.id : null }));
   }
 
   get focused() {
@@ -186,9 +186,11 @@ class PhoneViews extends EventEmitter {
   }
 
   cameraState() {
-    if (!this.cameraOn) return { on: false, facing: null, error: 'Camera is off on this computer: turn it on in TwinDesk’s Camera tab there', virtual: false };
+    if (!this.cameraOn) return { on: false, facing: null, error: 'Camera is off on this computer: turn it on in TwinDesk’s Camera tab there', virtual: false, virtualActive: false, wcId: null };
     const v = [...this.views.values()].find((x) => x.kind === 'camera' && !x.ending);
-    return { on: !!v, facing: v ? v.facing : null, error: v ? v.error || '' : '', virtual: !!(this.vcam && this.vcam.ready) };
+    const wc = v && v.win && !v.win.isDestroyed() ? v.win.webContents : null;
+    const virtualActive = !!(v && wc && this.vcam && this.vcam.ready && (!this.vcam.activeSource || this.vcam.activeSource === wc));
+    return { on: !!v, facing: v ? v.facing : null, error: v ? v.error || '' : '', virtual: !!(this.vcam && this.vcam.ready), virtualActive, viewId: v ? v.id : null, shown: !!(v && v.win && !v.win.isDestroyed() && v.win.isVisible()), wcId: wc ? wc.id : null };
   }
 
   openApp(pkg, name) {

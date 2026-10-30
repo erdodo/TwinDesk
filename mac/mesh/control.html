@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <base href="../"><!-- multi-device: this page is mac/mesh/control.html; everything else loads from mac/ -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:">
   <title>TwinDesk</title>
   <link rel="stylesheet" href="mesh/control.css">
   <link rel="stylesheet" href="mesh/control-pages.css">
@@ -66,12 +66,14 @@
   <script src="ui-clipboard.js"></script>
   <script src="../shared/ui-nowplaying.js"></script>
   <script src="ui-audio.js"></script>
+  <script src="mesh/ui-camera.js"></script>
+  <script src="../shared/ui-remote.js"></script>
   <script src="ui-terminal.js"></script>
   <script src="ui-notifs.js"></script>
   <script src="ui-files.js"></script>
   <script src="ui-mount.js"></script>
   <script src="ui-apps.js"></script>
-  <script src="ui-phone.js"></script>
+  <script src="mesh/ui-phone.js"></script>
   <script src="ui-general.js"></script>
   <script src="ui-about.js"></script>
   <script src="ui-setup.js"></script>

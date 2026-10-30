@@ -51,6 +51,20 @@ class PhoneDir extends EventEmitter {
     return this.hub.sessions.list().filter((s) => s.connected && s.peerOs === P.OS.ANDROID).map((s) => this.ctxOf(s.id)).filter(Boolean);
   }
 
+  sendToClient(msg, id = null) {
+    if (id) {
+      const devId = typeof id === 'object' ? id.id || id.deviceId : id;
+      const s = this.hub.sessions.get(devId);
+      if (s && s.connected) return s.send(msg);
+    }
+    let ok = false;
+    for (const c of this.all()) {
+      const s = this.hub.sessions.get(c.id);
+      if (s && s.connected && s.send(msg)) ok = true;
+    }
+    return ok;
+  }
+
   scoped(id = null) {
     return new ScopedPhonePeer(this.hub, this.server, id);
   }
@@ -231,6 +245,13 @@ class PhoneSet extends EventEmitter {
     this.emit('change');
   }
 
+  closeView(id) {
+    id = Number(id);
+    for (const u of this.all) {
+      if (u.views && u.views.views.has(id)) return u.views.close(id);
+    }
+  }
+
   shutdown() {
     for (const u of this.all) if (u.views) u.views.shutdown();
   }
@@ -249,6 +270,10 @@ class PhoneSet extends EventEmitter {
       // Every phone connected now, each with how its adb connection is doing.
       phones: this.all.filter((u) => u.link.current).map((u) => ({
         id: u.link.current.deviceId, name: u.link.current.name, usb: !!u.link.current.ice, state: u.bridge.state, via: u.bridge.via,
+        rttMs: u.link.current.rttMs, // each phone's own link, battery and colours (the sidebar tiles)
+        battery: u.phone.info ? u.phone.info.battery : null, charging: !!(u.phone.info && u.phone.info.charging),
+        colors: u.phone.info && u.phone.info.colors && u.phone.info.colors.length ? u.phone.info.colors : null,
+        camera: u.views && typeof u.views.cameraState === 'function' ? u.views.cameraState() : null,
       })),
     };
   }
