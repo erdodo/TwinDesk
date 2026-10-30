@@ -49,8 +49,12 @@ const driver = {
   },
 
   // The controller, plugged in while this runs; pad states (12 bytes each) go to its stdin.
-  feed(onExit) {
-    const p = spawn(EXE, ['feed'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+  feed(onExit, slot = null) {
+    const args = ['feed'];
+    if (slot !== null && slot !== undefined) args.push(String(slot));
+    const p = spawn(EXE, args, { windowsHide: true, stdio: ['pipe', 'ignore', 'pipe'] });
+    p.slot = slot;
+    p.stderr.on('data', (d) => console.log(`[pad${slot ? ' ' + slot : ''}] ` + String(d).trim()));
     p.on('exit', onExit);
     p.on('error', onExit);
     p.stdin.on('error', () => {});

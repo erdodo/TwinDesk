@@ -125,6 +125,7 @@ let wired = null; // wired.js, with the phone
 let phone = null; // A phone as the peer: phone.js (its .bridge: phone-bridge.js)
 let phoneDrive = null; // its storage as a drive here (phonedrive.js), the first phone's
 let vcam = null; // Camera: the running camera's picture, to the window/preview and virtual camera (shared/vcam.js, vcam.js)
+let phoneRemote = null; // Remote: the phone as touchpad, keyboard and gamepad here (shared/phone-remote.js)
 let bleHost = null; // Bluetooth, for devices not on this network: we host (blepipe.js)
 let bleGuest = null; // … we connect to a host
 let blePhones = null; // phones that advertise: we connect to them (a PC's Bluetooth often can't advertise)
@@ -230,6 +231,7 @@ function start() {
     if (mode === 'driving') hud.show('away', (kvm.keyboardOnly ? 'Typing on ' : 'Using ') + name);
     else if (mode === 'driven') hud.show('driven', name + ' is using {me}');
     else hud.show('home', 'Back on {me}');
+    if (phoneRemote) phoneRemote.refresh();
   };
   // Cursor lock: the popup goes where the pointer is (the device we drive shows its own).
   kvm.onLock = (on, mode) => {
@@ -333,6 +335,7 @@ function start() {
   const ipc = setupIpc({ hub, link, discovery, screen, clip, kvm, layoutSync, terminal, sshd, fileDrop, smb, apps, sound, pcScreen, pcApps, peerApps, vdd, notifs, fileClip, wake, updates, settings, save: saveSettings, push: pushState, buildState,
     get phone() { return phone; }, get phoneViews() { return phone ? phone.views : null; }, get phoneDrive() { return phoneDrive; }, connectPhoneDev, cancelPhoneInvite, phoneHub: loadHub,
     get vcam() { return vcam; }, setCamera,
+    get phoneRemote() { return phoneRemote; }, loadRemote,
     get net() { return net; }, applyNet, joinHotspot, applyMesh: () => autoJoin && autoJoin.schedule(),
     checkFirewall, fixFirewall, setStartup, onApp: updateTray });
   pairSync = new PairSync({ link, settings, save: saveSettings, set: ipc.set }); // Two-way switches per pair
@@ -388,6 +391,9 @@ async function startHost() {
 function startPhone(server, pairing) {
   const pl = new PhoneLink(hub, server);
   setupHub(pl);
+  // When Remote is off, tell the phone as soon as it says hello so it shows "Remote is off".
+  pl.on('client', (ctx) => !settings.remote.allow && pl.sendToClient({ t: P.T.REMOTE_STATE, allowed: false, why: 'Remote is off on this computer: turn it on in TwinDesk’s Remote page there' }, ctx.deviceId));
+  loadRemote();
   const adb = new Adb(); // one adb for every phone
   // A phone on a USB cable: pairing, the session, screen and sound through it (no Wi-Fi needed).
   wired = new Wired({ adb, raw: server, peer: pl, getId: () => device.id, getName: () => device.name,
@@ -571,6 +577,23 @@ function setCamera(on) {
     }
   }
   pushState();
+}
+
+// Remote: the phone as touchpad, keyboard and gamepad here (shared/phone-remote.js).
+function loadRemote() {
+  if (phoneRemote || !phoneLink || (settings.remote && settings.remote.allow === false)) return phoneRemote;
+  const { PhoneRemote } = require('../../shared/phone-remote.js');
+  phoneRemote = new PhoneRemote({
+    server: phoneLink,
+    helper,
+    getSettings: () => settings,
+    atHome: () => !kvm || kvm.mode === 'home',
+    onChange: pushState,
+    loadPad: () => require('../gamepad'),
+    save: saveSettings,
+  });
+  phoneRemote.refresh();
+  return phoneRemote;
 }
 
 // ---- not on the same network: Bluetooth, and Wi-Fi when it's needed ----
@@ -903,6 +926,22 @@ function buildState() {
     setup: { missing: miss, show: setupShows(miss) },
     camera: { on: !!(settings.camera && settings.camera.on) },
     vcam: vcam ? vcam.view() : { checked: true, supported: true, on: false },
+    remote: phoneRemote ? phoneRemote.view
+      : {
+          allow: !(settings.remote && settings.remote.allow === false),
+          why: '',
+          opened: false,
+          using: false,
+          phones: [],
+          pad: {
+            on: !!(settings.remote && settings.remote.pad),
+            supported: true,
+            live: false,
+            busy: '',
+            message: '',
+            name: 'Xbox 360 controller',
+          },
+        },
     phone: phone ? { ...phone.view, settings: settings.phone } : null,
     mount: { ...(phoneDrive ? phoneDrive.view : {}), on: settings.mount.on },
     // Calls, Messages and Photos: the settings alone until the hub is loaded (setupHub).
@@ -1142,6 +1181,7 @@ app.on('before-quit', () => {
   if (phoneHub && phoneHub.audio) phoneHub.audio.stop(); // the phone's calls go back to it
   if (phoneHub && phoneHub.share) phoneHub.share.stop();
   if (callwin) callwin.close();
+  if (phoneRemote) phoneRemote.release();
   if (kvm) kvm.shutdown(); // gives back any captured input and stops the helper
 });
 
