@@ -51,6 +51,20 @@ class PhoneDir extends EventEmitter {
     return this.hub.sessions.list().filter((s) => s.connected && s.peerOs === P.OS.ANDROID).map((s) => this.ctxOf(s.id)).filter(Boolean);
   }
 
+  sendToClient(msg, id = null) {
+    if (id) {
+      const devId = typeof id === 'object' ? id.id || id.deviceId : id;
+      const s = this.hub.sessions.get(devId);
+      if (s && s.connected) return s.send(msg);
+    }
+    let ok = false;
+    for (const c of this.all()) {
+      const s = this.hub.sessions.get(c.id);
+      if (s && s.connected && s.send(msg)) ok = true;
+    }
+    return ok;
+  }
+
   scoped(id = null) {
     return new ScopedPhonePeer(this.hub, this.server, id);
   }

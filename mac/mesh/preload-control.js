@@ -14,7 +14,7 @@ const ACTIONS = [
   'phonePair', 'phoneScreen', 'phoneCamera', 'phoneListCameras', 'camera', 'phoneOpenApp', 'phoneCloseView', 'phoneRetry', 'phoneInstallFull', 'phoneMount',
   'phoneUnmount', 'setMount', 'phoneAppMenu', 'setUpdates', 'skipUpdate', 'unskipUpdate', 'checkUpdates', 'openUpdate',
   'openLink', 'setLayoutCell', 'removeFromLayout', 'disconnect', 'connectAgain', 'setNet', 'netJoinHotspot',
-  'netCancel', 'netWifi', 'hub',
+  'netCancel', 'netWifi', 'hub', 'setRemote',
 ];
 
 const api = {

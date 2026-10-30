@@ -18,7 +18,7 @@ const SETTINGS_URLS = {
   location: 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices',
   extensions: 'x-apple.systempreferences:com.apple.ExtensionsPreferences?Sharing',
 };
-const TABS = ['phone', 'overview', 'calls', 'messages', 'media', 'pfiles', 'share', 'receive', 'cursor', 'keyboard', 'clipboard', 'notifications', 'files', 'mount', 'terminal', 'audio', 'camera', 'apps', 'multi', 'general', 'about'];
+const TABS = ['phone', 'overview', 'calls', 'messages', 'media', 'pfiles', 'share', 'receive', 'cursor', 'keyboard', 'clipboard', 'notifications', 'files', 'mount', 'terminal', 'audio', 'camera', 'remote', 'apps', 'multi', 'general', 'about'];
 
 const bool = (v) => !!v;
 const clamp = (lo, hi, dflt) => (v) => {
@@ -522,6 +522,18 @@ function setupIpc(ctx) {
           if (v && v.win && !v.win.isDestroyed()) vcam.setActiveSource(v.win.webContents);
         }
       }
+    },
+    // Remote tab: the phone's Remote page here (shared/phone-remote.js).
+    setRemote(m) {
+      if (!m || typeof m !== 'object') return;
+      const r = ctx.remote ? ctx.remote() : (ctx.phoneRemote || null);
+      if ('allow' in m && !r && m.allow === true) {
+        settings.remote = { ...(settings.remote || {}), allow: true };
+        if (ctx.loadRemote) ctx.loadRemote();
+      } else if ('allow' in m && r) {
+        r.setAllow(m.allow === true);
+      }
+      save();
     },
     // "Share sound with the screen" (Display › Mac → PC).
     setScreenSound(on) {

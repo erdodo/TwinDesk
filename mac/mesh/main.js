@@ -243,6 +243,8 @@ function publishState() {
     if (svc) state.wake = svc.wake.view;
     state.camera = { on: !!(settings.camera && settings.camera.on) };
     state.vcam = svc && svc.vcam ? svc.vcam.view() : { checked: true, supported: true, on: false };
+    state.remote = svc && svc.phoneRemote ? svc.phoneRemote.view
+      : { allow: !(settings.remote && settings.remote.allow === false), why: '', opened: false, using: false, phones: [], pad: { on: false, supported: false, live: false, busy: '', message: 'Real gamepad isn’t on the Mac', name: '' } };
     if (svc && svc.phone) state.phone = { ...svc.phone.view, settings: settings.phone };
     if (svc && svc.net) {
       const c = peer && peer.current;
@@ -639,6 +641,26 @@ app.whenReady().then(() => {
   svc.loadCamera = loadCamera;
   svc.setCamera = setCamera;
   if (settings.camera && settings.camera.on) loadCamera();
+
+  // Remote: the phone as touchpad, keyboard and gamepad here.
+  svc.loadRemote = () => {
+    if (svc.phoneRemote || (settings.remote && settings.remote.allow === false)) return svc.phoneRemote || null;
+    const { PhoneRemote } = require('../../shared/phone-remote.js');
+    svc.phoneRemote = new PhoneRemote({
+      server: phoneDir,
+      helper: svc.helper,
+      getSettings: () => settings,
+      atHome: () => !svc.kvm || svc.kvm.mode === 'home',
+      onChange: pushState,
+      padNote: 'Real gamepad isn’t on the Mac. To use {name} as a gamepad, turn on Remote › As a Bluetooth gamepad on {name}, then pair it with this Mac in System Settings › Bluetooth',
+      save: () => store.saveSettings(settings),
+    });
+    svc.phoneRemote.refresh();
+    return svc.phoneRemote;
+  };
+  svc.remote = () => svc.phoneRemote || null;
+  svc.loadRemote();
+  if (svc.kvm) svc.kvm.on('where', () => svc.phoneRemote && svc.phoneRemote.refresh());
 
   const blockEdge = svc.kvm.blockEdge;
   svc.kvm.blockEdge = () => blockEdge() || svc.phone.focused; // moving inside the phone window never crosses
